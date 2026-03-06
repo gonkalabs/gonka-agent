@@ -509,6 +509,22 @@ Total weight:   811,368
 - Delta `CacheQualityWeight` для ноды с cache vs без cache
 - `stats(A) ≈ chain(B) ± 5%` — опровержение blizko's concern об asymmetric advantage
 
+### MAJOR EVENT — 2026-03-05: коммиты смерджены в gonka-ai/gonka
+
+| Коммит | Статус | Что |
+|---|---|---|
+| [d4e74c4](https://github.com/gonka-ai/gonka/commit/d4e74c4da683bb4a1ee894a5004af2247ac65c3c) | **MERGED** | feat(semantic-cache): TTL, model version, authz revoke — author: cisco |
+| [e5995db](https://github.com/gonka-ai/gonka/commit/e5995db2391d9d1b9037ffd0b3c5d2344437bd2c) | **MERGED** | same, 8 files +614/-24 |
+
+**Что смерджено:**
+- `cache.go`: ModelVersion + ValidUntilEpoch + UpdateCacheParams (live governance)
+- `cache_test.go`: 7 unit tests (все PASS подтверждено)
+- `ante_poc_period.go`: checkCacheQualityMessage — блокирует bypass feature-flag через MsgExec
+- `permissions.go`: MsgSubmitCacheQualitySummary добавлен в InferenceOperationKeyPerms → **разблокировал GiP #857 (Grant→Exec→Revoke)**
+- `msg_server_cache_quality.go`, `cache_quality.go`, `errors.go`, `params.go`
+
+**Связь с issue #857:** maria-mitina тестировала delegation. Её тест падал с `"authorization not found"` потому что MsgSubmitCacheQualitySummary не был в InferenceOperationKeyPerms. Твой коммит исправляет это. Она написала тебе потому что твой код = её fix.
+
 ### Что нужно для BLOCKER → READY (Блок B)
 
 | Приоритет | Что | Статус |
@@ -516,9 +532,9 @@ Total weight:   811,368
 | — | Блок A unit tests 20/20 | **DONE 2026-03-05** |
 | — | `/admin/v1/cache/stats` impl + build | **DONE 2026-03-05** |
 | — | Блок C live network baseline | **DONE 2026-03-05** |
-| 1 | `CacheQualityParams.Enabled = true` на testnet | OPEN |
-| 2 | PR #859 image на `89.169.111.79:8000` | OPEN |
-| 3 | `GONKA_PRIVATE_KEY` (hex) — для auth | **BLOCKER** |
+| — | **PR #859 коммиты в gonka-ai/gonka** | **MERGED 2026-03-05** |
+| 1 | `GONKA_PRIVATE_KEY` / токены | BLOCKER для live inference |
+| 2 | `CacheQualityParams.Enabled = true` | OPEN |
 
 ---
 
