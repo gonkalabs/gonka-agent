@@ -1,0 +1,23 @@
+version: "3.9"
+
+# One-button setup for gonka-agent.
+# Usage:
+#   GONKA_API_KEY=gnk_live_... docker compose run --rm agent "fix the race condition in server.go"
+#
+# Or set GONKA_API_KEY in .env file.
+
+services:
+  agent:
+    build: .
+    image: gonka-agent:latest
+    environment:
+      - GONKA_API_KEY=${GONKA_API_KEY}
+      - GONKA_SOURCE_URL=${GONKA_SOURCE_URL:-https://gonka.gg/api/public}
+      - AGENT_MODEL=${AGENT_MODEL:-Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}
+      - AGENT_ALLOW_SHELL=${AGENT_ALLOW_SHELL:-true}
+      - AGENT_COMMAND_TIMEOUT=${AGENT_COMMAND_TIMEOUT:-120s}
+    volumes:
+      - ${PWD}:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
