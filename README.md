@@ -2,6 +2,8 @@
 
 AI coding agent built on the Gonka inference network.
 
+> **Community project** — built and maintained by [A. Mayveskii](https://github.com/Mayveskii). Reviewed and supported by [GonkaLabs](https://gonkalabs.com).
+
 ```
 gonka "add retry logic to the upload function"
 ```
@@ -17,7 +19,7 @@ go build -o bin/gonka ./cmd/gonka
 ./bin/gonka "your task"
 ```
 
-Get an API key at [gonka.gg](https://gonka.gg).
+Get an API key at [proxy.gonka.gg](https://proxy.gonka.gg).
 
 ---
 
@@ -29,7 +31,7 @@ All settings live in `.env` (copy from `.env.example`).
 |---|---|---|
 | `GONKA_API_KEY` | yes | Primary API key (`gnk_live_…`) |
 | `GONKA_API_KEYS` | no | Comma-separated pool — parallel planning |
-| `GONKA_SOURCE_URL` | no | Inference endpoint (default: `https://gonka.gg/api/public`) |
+| `GONKA_SOURCE_URL` | no | Inference endpoint (default: `https://proxy.gonka.gg/api/public`) |
 | `GONKA_DIRECT_URL` | no | Direct node URL — bypasses routing |
 | `AGENT_MODEL` | no | Model for execute phase |
 | `AGENT_PLAN_MODEL` | no | Smaller model for planning roles |
