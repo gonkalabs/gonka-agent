@@ -2,7 +2,7 @@
 
 AI coding agent built on the Gonka inference network.
 
-> **Community project** — built and maintained by [A. Mayveskii](https://github.com/Mayveskii). Reviewed and supported by [GonkaLabs](https://gonkalabs.com).
+> **Community project** — built and maintained by [A. Mayveskii](https://github.com/Mayveskii).
 
 ```
 gonka "add retry logic to the upload function"
