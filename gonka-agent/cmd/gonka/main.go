@@ -33,6 +33,7 @@ import (
 	"github.com/gonkalabs/gonka-agent/internal/rolechain"
 	"github.com/gonkalabs/gonka-agent/internal/roles"
 	"github.com/gonkalabs/gonka-agent/internal/semcache"
+	"github.com/gonkalabs/gonka-agent/internal/slotstore"
 	"github.com/gonkalabs/gonka-agent/internal/tools"
 )
 
@@ -147,6 +148,23 @@ func main() {
 		EmbedModel: cfg.EmbedModel,
 	})
 
+	// Binary singularity slot store: load slots, ingest raw input.
+	slots, slotErr := slotstore.Open(slotstore.Config{
+		SlotDir:      cfg.BSSlotDir,
+		EmbedURL:     cfg.BSEmbedURL,
+		ChunkLines:   cfg.BSChunkLines,
+		MinSimBps:    cfg.BSMinSimBps,
+		RawInputPath: cfg.BSRawInput,
+	})
+	if slotErr != nil {
+		fmt.Fprintf(os.Stderr, col(ansiYellow, "slots: ")+"%v\n", slotErr)
+	}
+	defer func() {
+		if slots != nil {
+			_ = slots.Close()
+		}
+	}()
+
 	// Header — no complexity label, just project info.
 	fmt.Printf("\n%s %s\n", col(ansiBold, "gonka"), col(ansiGray, "coding agent"))
 	fmt.Printf("  task:      %s\n", col(ansiBold, truncateStr(task, 60)))
@@ -154,26 +172,40 @@ func main() {
 		fmt.Printf("  language:  %s  build: %s\n", col(ansiCyan, bi.Language), col(ansiGray, bi.BuildCmd))
 	}
 	fmt.Printf("  pool:      %s keys\n", col(ansiGreen, fmt.Sprintf("%d", pool.Size())))
+	if slots != nil && slots.Count() > 0 {
+		fmt.Printf("  slots:     %s binary patterns loaded\n", col(ansiCyan, fmt.Sprintf("%d", slots.Count())))
+	}
 	fmt.Printf("  workspace: %s\n\n", col(ansiGray, cfg.Workspace))
 
 	progress := makeProgressFn()
 
-	// Semcache lookup: inject context before running.
+	// Context injection: semcache + slot store.
 	var sys string
+	sys = agent.BuildSystemPrompt(t, bi)
+
+	// Slot store: search for matching patterns before running.
+	if slots != nil && slots.Count() > 0 {
+		if matches := slots.Search(task); len(matches) > 0 {
+			fmt.Printf("  %s %d slot matches (best=%.2f)\n",
+				col(ansiCyan, "◇"), len(matches), matches[0].Similarity)
+			progress("cache", fmt.Sprintf("slot store: %d matches, best=%.2f", len(matches), matches[0].Similarity))
+			sys += slotstore.FormatContext(matches)
+		}
+	}
+
+	// Semcache lookup: inject context before running.
 	if scErr == nil && sc != nil {
 		if hit := sc.Lookup(task); hit.Kind != semcache.Miss {
 			label := "partial"
 			if hit.Kind == semcache.Full {
 				label = "full"
 			}
-			fmt.Printf("  %s %s hit (score %.2f)\n\n", col(ansiGray, "◈"), label, hit.Score)
+			fmt.Printf("  %s %s hit (score %.2f)\n", col(ansiGray, "◈"), label, hit.Score)
 			progress("cache", fmt.Sprintf("semcache %s hit score=%.2f", label, hit.Score))
-			sys = agent.BuildSystemPrompt(t, bi) + "\n\n" + hit.Context
+			sys += "\n\n" + hit.Context
 		}
 	}
-	if sys == "" {
-		sys = agent.BuildSystemPrompt(t, bi)
-	}
+	fmt.Println()
 
 	var result agent.RunResult
 	if hardMode {
@@ -209,6 +241,14 @@ func main() {
 		sc.Store(task, scSteps, result.FinalAnswer)
 		sc.UpdateQuality("resolved")
 	}
+
+	// Distill successful result into a binary slot.
+	if slots != nil && result.FinalAnswer != "" {
+		if err := slots.Distill(task, result.FinalAnswer, 0.8); err == nil {
+			fmt.Printf("  %s new slot distilled (total: %d)\n", col(ansiCyan, "◇"), slots.Count())
+		}
+	}
+
 	savePendingFeedback(cfg.Workspace, "resolved")
 
 	if result.FinalAnswer != "" {

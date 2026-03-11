@@ -52,6 +52,15 @@ type Config struct {
 	// Server
 	MCPTransport string
 	MCPPort      string
+
+	// Binary Singularity — slot store + raw input
+	BSSlotDir       string // directory for pattern_slots.bin (default ~/.gonka-cache/slots)
+	BSRawInput      string // path to any file for binary ingestion (git, markup, anything)
+	BSChunkLines    int    // lines per chunk for raw input (default 50)
+	BSMinSimBps     int    // minimum cosine similarity (basis points) for slot match (default 7500)
+	BSEmbedURL      string // embedder URL for slot distillation (default: EmbedURL or http://localhost:8686)
+	BSQualityURL    string // quality-middleware URL for mesh pool (default: http://localhost:9090)
+	BSDistillMode   string // continuous | ingest | both (default: continuous)
 }
 
 func Load() (*Config, error) {
@@ -120,6 +129,31 @@ func Load() (*Config, error) {
 		inferURL = "http://localhost:9090/v1"
 	}
 
+	// Binary singularity defaults
+	bsSlotDir := getEnv("BS_SLOT_DIR", "")
+	if bsSlotDir == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			bsSlotDir = home + "/.gonka-cache/slots"
+		}
+	}
+	bsChunkLines := 50
+	if v := getEnv("BS_CHUNK_LINES", ""); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &bsChunkLines); n == 0 || err != nil {
+			bsChunkLines = 50
+		}
+	}
+	bsMinSim := 7500
+	if v := getEnv("BS_MIN_SIM_BPS", ""); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &bsMinSim); n == 0 || err != nil {
+			bsMinSim = 7500
+		}
+	}
+	bsEmbedURL := getEnv("BS_EMBED_URL", "")
+	if bsEmbedURL == "" {
+		bsEmbedURL = getEnv("AGENT_EMBED_URL", "http://localhost:8686")
+	}
+
 	cfg := &Config{
 		GonkaPrivateKey:   getEnv("GONKA_PRIVATE_KEY", ""),
 		GonkaAddress:      getEnv("GONKA_ADDRESS", ""),
@@ -146,6 +180,13 @@ func Load() (*Config, error) {
 		MCPPort:           getEnv("AGENT_MCP_PORT", "3000"),
 		AgentModel:        getEnv("AGENT_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"),
 		PlanModel:         getEnv("AGENT_PLAN_MODEL", ""),
+		BSSlotDir:         bsSlotDir,
+		BSRawInput:        getEnv("BS_RAW_INPUT", ""),
+		BSChunkLines:      bsChunkLines,
+		BSMinSimBps:       bsMinSim,
+		BSEmbedURL:        bsEmbedURL,
+		BSQualityURL:      getEnv("BS_QUALITY_URL", "http://localhost:9090"),
+		BSDistillMode:     getEnv("BS_DISTILL_MODE", "continuous"),
 	}
 
 	if cfg.GonkaPrivateKey == "" && cfg.GonkaAPIKey == "" {
