@@ -16,7 +16,7 @@ Implements measurement layer for [GiP #860 — Inference Quality Axis Registry](
 ## Usage
 
 ```go
-import quality "github.com/Mayveskii/gonka-quality-middleware"
+import quality "github.com/gonkalabs/gonka-agent/examples/quality-middleware"
 
 qm := quality.New(9700) // SimilarityThresholdBps = 0.97
 
