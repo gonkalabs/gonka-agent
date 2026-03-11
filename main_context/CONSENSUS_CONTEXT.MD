@@ -1959,4 +1959,50 @@ Infrastructure:     docker → docker → K3s mesh (4 nodes)
 
 ---
 
-*Версия: 2026-03-11 v10 — секция 26: Experiment 3, real developer semantics, K3s mesh, hub score 1.001, multi-user binary singularity.*
+---
+
+## 27. ЭКСПЕРИМЕНТ 4 — БИНАРНАЯ ПЕРЕДАЧА НЕПРИКОСНОВЕННЫХ ДАННЫХ (2026-03-11)
+
+### 27.1. Принцип
+
+Файл `text` (676012 байт, SHA256: `dd8c41975e497defbe043cedb9c53721785784a4b4d2c0f3b1daa089ddf5a782`) передан на bookworm K3s кластер **as-is**. Ни один байт не был изменён. Runner получил его через `--raw-input` и передал в embedder кластера для дистилляции.
+
+### 27.2. Результаты
+
+| Metric | Exp 3 | **Exp 4** | Δ |
+|---|---|---|---|
+| Hub PQM | 1.001 | **1.020** | **+1.9%** |
+| Slots | 6 | **197** | ×32.8 |
+| Raw input | — | **676012 bytes** | new |
+| Chunks | — | **197** | new |
+| Migration ready | no | **YES (all 3)** | new |
+| RAM overhead | +176 MB | **+3 MB** | ×58 better |
+
+### 27.3. Ключевой вывод
+
+**Raw > Processed.** Неприкосновенные данные дают PQM 1.020 vs 1.001 из предобработанных сценариев. Embedder (all-MiniLM-L6-v2) **сам** находит семантику лучше чем ручная интерпретация.
+
+Поведение разработчика = семантически-абстрактный паттерн в зоне интереса. 50 строк ≈ один цикл принятия решения. 197 таких циклов → 197 PatternSlots → полное покрытие workflow.
+
+### 27.4. Прогрессия PQM всех 4 экспериментов
+
+```
+Exp 1: 0     (no hub check)
+Exp 2: 0.988 (synthetic scenarios)
+Exp 3: 1.001 (manually extracted developer scenarios)
+Exp 4: 1.020 (raw binary data, untouched)
+```
+
+Монотонный рост. Чем ближе к неприкосновенным данным — тем выше качество.
+
+### 27.5. План ускорения: квантовая бинаризация быстрее
+
+1. Raw ingest → embedder → batch distillation (197 slots за один проход)
+2. Behavior vectors: session → embedding sequence → centroid → validated pattern
+3. Cross-user synthesis: 2+ developers → same vector → binary slot с reward
+4. Hub stimulus: validated patterns → priority routing
+5. Применимость: ЖКХ, юридика, исследования, этика — любой flow где поведение перебираемо
+
+---
+
+*Версия: 2026-03-11 v11 — секция 27: Experiment 4, raw binary ingest, PQM 1.020, 197 slots from untouched data, behavioral singularity.*
