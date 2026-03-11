@@ -68,7 +68,7 @@ func classifyError(err error, statusCode int) FailoverReason {
 	if strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "broken pipe") {
 		return FailoverEOF
 	}
-	if strings.Contains(msg, "HTTP 429") {
+	if strings.Contains(msg, "HTTP 429") || strings.Contains(strings.ToLower(msg), "rate limit") {
 		return FailoverRateLimit
 	}
 	if strings.Contains(msg, "HTTP 5") {
