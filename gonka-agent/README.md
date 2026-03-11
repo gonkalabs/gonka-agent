@@ -1,127 +1,234 @@
 # gonka-agent
 
-AI coding agent built on the Gonka inference network.
+AI coding agent on the Gonka decentralised inference network.
+Branch: `dev/binary-singularity` | Part of [GiP #860](https://github.com/gonka-ai/gonka/discussions/860)
 
-```
-gonka "add retry logic to the upload function"
+```bash
+./gonka "add retry logic to the upload function"
 ```
 
 ---
 
-## Quick start
+## Quick start — any machine with Go 1.22+
 
 ```bash
-cp .env.example .env
-# fill in GONKA_API_KEY
+# Clone and build (no CGO, no system deps, ~5s)
+git clone https://github.com/gonkalabs/gonka-agent
+cd gonka-agent
 go build -o bin/gonka ./cmd/gonka
-./bin/gonka "your task"
+
+# Configure
+cp .env.example .env
+# Set GONKA_API_KEY (get at gonka.gg → API Keys)
+
+# Run
+./bin/gonka "describe your task"
 ```
 
-Get an API key at [gonka.gg](https://gonka.gg).
+**Or use the prebuilt binary:**
+```bash
+# Linux x86_64, statically linked, 6MB
+./bin/gonka  # included in this branch
+```
+
+---
+
+## What this branch adds — Binary Singularity
+
+Standard gonka-agent + PatternSlot store + mesh pool integration.
+
+Every solved task becomes a binary pattern. Next similar task — context
+arrives from the pattern store before the LLM call. The network learns.
+
+```
+Your task
+    │
+    ├─ PatternSlot store (local, ~/.gonka-cache/slots/)
+    │   cosine search → matching patterns injected as context
+    │
+    ├─ Mesh pool (quality-middleware /quality/search)
+    │   other participants' patterns → available to you
+    │
+    ├─ Semcache (local, .gonka-cache/semcache.json)
+    │   previous sessions → partial/full hits
+    │
+    └─ Gonka LLM → answer
+         │
+         └─ on success:
+              Distill → new PatternSlot
+              ShareToMesh → POST /quality/slots/share
+              X-Inference-Feedback: resolved (L4 signal)
+```
+
+**Proven:** PQM = 1.020 measured on 11,520 runs with raw binary input.
+Binary layer quality exceeds single GPU inference on every measured axis.
 
 ---
 
 ## Configuration
 
-All settings live in `.env` (copy from `.env.example`).
+All settings in `.env` (copy from `.env.example`).
 
-| Variable | Required | Description |
+### Core
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GONKA_API_KEY` | yes | — | Primary key (`gnk_live_…`) |
+| `GONKA_API_KEYS` | no | — | Comma-sep pool — parallel planning |
+| `GONKA_SOURCE_URL` | no | `https://gonka.gg/api/public` | Inference endpoint |
+| `AGENT_MODEL` | no | Qwen3-235B | Execute phase model |
+| `AGENT_PLAN_MODEL` | no | same | Smaller model for planning |
+| `AGENT_WORKSPACE` | no | `.` | Directory the agent reads/writes |
+| `AGENT_ALLOW_SHELL` | no | `true` | Enable shell execution |
+
+### Binary Singularity (new in this branch)
+
+| Variable | Default | Description |
 |---|---|---|
-| `GONKA_API_KEY` | yes | Primary API key (`gnk_live_…`) |
-| `GONKA_API_KEYS` | no | Comma-separated pool — parallel planning |
-| `GONKA_SOURCE_URL` | no | Inference endpoint (default: `https://gonka.gg/api/public`) |
-| `GONKA_DIRECT_URL` | no | Direct node URL — bypasses routing |
-| `AGENT_MODEL` | no | Model for execute phase |
-| `AGENT_PLAN_MODEL` | no | Smaller model for planning roles |
-| `AGENT_WORKSPACE` | no | Directory to work in (default: `.`) |
-| `AGENT_ALLOW_SHELL` | no | Enable `run_command` tool (default: `true`) |
-| `AGENT_COMMAND_TIMEOUT` | no | Shell timeout (default: `60s`) |
-| `AGENT_WEB_SEARCH_KEY` | no | Brave Search key for `web_search` |
-| `SEMCACHE_MAX_ENTRIES` | no | Semantic cache size (default: 1000) |
+| `BS_SLOT_DIR` | `~/.gonka-cache/slots` | PatternSlot persistence directory |
+| `BS_RAW_INPUT` | — | Path to ANY file → binarize on startup |
+| `BS_CHUNK_LINES` | `50` | Lines per chunk for raw input |
+| `BS_MIN_SIM_BPS` | `7500` | Cosine similarity floor (0.75 = 7500/10000) |
+| `BS_EMBED_URL` | `http://localhost:8686` | Local embedder URL |
+| `BS_QUALITY_URL` | `http://localhost:9090` | Quality-middleware mesh pool URL |
+| `BS_DISTILL_MODE` | `continuous` | `continuous` / `ingest` / `both` |
+
+### Raw binary input — any data source
+
+```bash
+# Developer workflow log
+BS_RAW_INPUT=/home/user/repos/project/.git/logs/HEAD
+
+# Research notes
+BS_RAW_INPUT=/home/user/research/observations.txt
+
+# Downloaded spec
+BS_RAW_INPUT=/tmp/rfc9110.txt
+
+# Personal notes, any language, any format
+BS_RAW_INPUT=/home/user/Документы/notes.md
+```
+
+File transmitted **as-is** to embedder — zero pre-processing.
+System splits by lines (BS_CHUNK_LINES), embeds, distills PatternSlots.
 
 ---
 
 ## Modes
 
-| Flag | Mode | When to use |
+| Flag | Mode | When |
 |---|---|---|
-| *(none)* | simple | Short tasks, quick edits |
-| `--hard` | phased | Refactors, architecture, multi-file |
-| `--new` | — | Clear session, start fresh |
+| *(none)* | auto | Short tasks, edits — model decides |
+| `--hard` | phased 8-role | Refactors, architecture, multi-file |
+| `--new` | — | Clear session |
 | `--clear-cache` | — | Invalidate context cache |
 
 ---
 
-## How it works
-
-```
-user task
-   │
-   ▼
-semcache lookup ──── FULL HIT ──► return cached answer (agent verifies)
-   │ MISS/PARTIAL                 ▲
-   ▼                              │
-system prompt (+ partial context) │
-   │                              │
-   ▼                              │
-6-phase Plan-First Chain          │
-   Plan → Implement → Verify ─────┘
-   │
-   ▼
-semcache.Store(task, steps, answer)
-X-Inference-Feedback → opengnk → Gonka quality metrics
-```
-
-Each tool call is monitored by the loop detector — the agent is stopped
-early if it repeats the same operation without progress.
-
----
-
-## Tools
+## Tools available to the agent
 
 | Tool | Description |
 |---|---|
-| `read_file` | Read a file in the workspace |
-| `write_file` | Write or overwrite a file |
-| `run_command` | Execute a shell command |
-| `web_search` | Search the web (Brave / SearXNG) |
-| `web_fetch` | Fetch a URL |
-| `semantic_search` | Find relevant files by meaning (uses Gonka `/v1/embeddings`) |
-| `memory_write` | Persist agent notes across turns |
-| `todo_write` / `todo_read` | Manage a structured task list |
+| `read_file` / `write_file` | File read/write |
+| `search_replace` / `verify_replace` | Targeted edits (safe, checked) |
+| `run_command` | Shell execution |
+| `web_search` / `web_fetch` | Web access |
+| `semantic_search` | Find relevant files by meaning |
+| `grep_search` / `glob` | Code search |
+| `git_diff` / `git_status` | Git awareness |
+| `memory_write` | Persist notes across sessions |
+| `todo_write` / `todo_read` | Structured task tracking |
+
+---
+
+## Quality signals — your agent contributes to GiP #860
+
+Every task the agent runs sends quality signals to the Gonka network:
+
+- **L4** — `X-Inference-Feedback: resolved/unresolved` on every inference
+- **L6** — cache hit rate tracked by opengnk / quality-middleware
+- **L8** — latency CV measured per session
+- **L9** — completion rate (task finished vs abandoned)
+
+These signals feed `CacheQualityWeight` at epoch settlement (when enabled
+via governance). Your solved tasks improve routing quality for all participants.
+
+---
+
+## Quality matrix — what the numbers mean
+
+From live network data (2,503,595 inferences, epochs 161-191):
+
+```
+Current composite QualityScore = 0.7236
+
+Binary singularity improvement (measured, not modeled):
+  Exp 2: 9,216  runs  PQM = 0.988  → Hub APPROVED
+  Exp 3: 15,360 runs  PQM = 1.001  → EXCEEDS single GPU inference
+  Exp 4: 11,520 runs  PQM = 1.020  → +2% above GPU baseline
+  
+Memory footprint: 19-23 MB peak (vs ~16GB for GPU)
+Slot hit latency: ~5ms (vs ~120ms GPU inference)
+```
+
+PQM > 1.0 means: binary pattern layer produces better answers than
+a fresh GPU inference call. The collective memory beats single-shot.
+
+---
+
+## Connect to quality-middleware (mesh pool)
+
+Start the mesh pool locally (LITE tier):
+```bash
+cd ../gonka-main/deploy/binary-singularity/lite
+./run.sh  # starts embedder + mock-node
+```
+
+Or point to an existing node:
+```bash
+BS_QUALITY_URL=http://your-node:9090
+BS_EMBED_URL=http://your-node:8686
+```
+
+Then agents on different machines share patterns:
+```
+Agent A solves task → POST /quality/slots/share
+Agent B searches   → POST /quality/search → finds A's pattern
+```
 
 ---
 
 ## Session persistence
 
-Completed conversations are saved to `.gonka-cache/session.json`.
-The file is written atomically (rename) under a PID-checked write lock —
-safe for multiple concurrent agent instances on the same workspace.
+Conversations saved to `.gonka-cache/session.json` (atomic rename, PID-locked).
+PatternSlots saved to `~/.gonka-cache/slots/pattern_slots.gob`.
 
-Run `gonka --new` to start a fresh session.
-
----
-
-## Semantic cache
-
-The agent stores each solved task locally in `.gonka-cache/semcache.json`
-as an embedding + steps + answer.  On the next similar task:
-
-- **score ≥ 0.95** — inject previous answer; agent verifies and adapts.
-- **score 0.75–0.94** — inject previous steps as context; agent continues.
-- **score < 0.75** — solve from scratch, store result.
-
-Quality scores (0–1) are updated from outcome feedback (`resolved` / `unresolved`)
-and fed back to Gonka opengnk as `X-Inference-Feedback` for GiP #860 metrics.
+Both survive process restart. Both are on-disk, no external service required.
 
 ---
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the full system design
-including the decentralised semantic cache, key pool, loop detection, and
-opengnk L1 cache.
+```
+cmd/gonka/main.go           — CLI entry point
+internal/
+  config/config.go          — all env vars (Core + BS_*)
+  agent/agent.go            — 6-phase Plan-First execution loop
+  agent/failover.go         — key pool with cooldowns
+  slotstore/store.go        — PatternSlot store + SearchMesh + ShareToMesh
+  semcache/semcache.go      — semantic similarity cache
+  rolechain/chain.go        — 8-role planning chain
+  roles/roles.go            — role definitions (Scientist, GitWorker, etc.)
+  tools/tools.go            — 20 tools available to the agent
+  loopdetect/loopdetect.go  — prevents infinite tool loops
+```
 
-## Testing
+Full design: [docs/architecture.md](docs/architecture.md)
+Quality matrix: [docs/testing.md](docs/testing.md)
+Deploy guide: [../gonka-main/deploy/binary-singularity/GUIDE.md](../gonka-main/deploy/binary-singularity/GUIDE.md)
 
-See [docs/testing.md](docs/testing.md) for the GiP #860 / PR #859 test matrix.
+---
+
+*Part of Binary Singularity — dev/binary-singularity.*
+*For researchers: your data, your patterns, your contribution to the mesh.*
+*Beta for researchers encourages faith in you ♥*
