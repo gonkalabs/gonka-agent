@@ -152,6 +152,7 @@ func main() {
 	slots, slotErr := slotstore.Open(slotstore.Config{
 		SlotDir:      cfg.BSSlotDir,
 		EmbedURL:     cfg.BSEmbedURL,
+		QualityURL:   cfg.BSQualityURL,
 		ChunkLines:   cfg.BSChunkLines,
 		MinSimBps:    cfg.BSMinSimBps,
 		RawInputPath: cfg.BSRawInput,
@@ -242,10 +243,24 @@ func main() {
 		sc.UpdateQuality("resolved")
 	}
 
-	// Distill successful result into a binary slot.
+	// Distill successful result into a binary slot and share to mesh.
 	if slots != nil && result.FinalAnswer != "" {
 		if err := slots.Distill(task, result.FinalAnswer, 0.8); err == nil {
 			fmt.Printf("  %s new slot distilled (total: %d)\n", col(ansiCyan, "◇"), slots.Count())
+			newest := slotstore.Slot{
+				ID: fmt.Sprintf("slot-%d", slots.Count()),
+				Vec: func() []float32 {
+					// Retrieve vec from last distilled slot
+					if results := slots.Search(task); len(results) > 0 {
+						return results[0].Slot.Vec
+					}
+					return nil
+				}(),
+				Quality: 0.8,
+			}
+			if err := slots.ShareToMesh(newest); err == nil {
+				fmt.Printf("  %s shared to mesh pool\n", col(ansiGray, "↗"))
+			}
 		}
 	}
 

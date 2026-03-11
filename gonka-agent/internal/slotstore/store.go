@@ -47,6 +47,7 @@ type SearchResult struct {
 type Config struct {
 	SlotDir      string
 	EmbedURL     string
+	QualityURL   string
 	ChunkLines   int
 	MinSimBps    int
 	RawInputPath string
@@ -159,6 +160,53 @@ func (s *Store) Distill(task, solution string, quality float32) error {
 	s.slots = append(s.slots, slot)
 	s.dirty = true
 	return nil
+}
+
+// ShareToMesh pushes a slot to the quality-middleware mesh pool
+// so other participants can find it via /quality/search.
+func (s *Store) ShareToMesh(slot Slot) error {
+	if s.cfg.QualityURL == "" || len(slot.Vec) == 0 {
+		return nil
+	}
+
+	type meshEntry struct {
+		NodeID  string    `json:"node_id"`
+		SlotID  string    `json:"slot_id"`
+		Vec     []float32 `json:"vec"`
+		HitMode string    `json:"hit_mode"`
+		Quality float32   `json:"quality"`
+	}
+	payload := struct {
+		NodeID string      `json:"node_id"`
+		Slots  []meshEntry `json:"slots"`
+	}{
+		NodeID: s.nodeID(),
+		Slots: []meshEntry{{
+			NodeID:  s.nodeID(),
+			SlotID:  slot.ID,
+			Vec:     slot.Vec,
+			HitMode: "slot",
+			Quality: slot.Quality,
+		}},
+	}
+
+	body, _ := json.Marshal(payload)
+	url := strings.TrimRight(s.cfg.QualityURL, "/") + "/quality/slots/share"
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (s *Store) nodeID() string {
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "agent"
+	}
+	return hostname
 }
 
 // Count returns the number of stored slots.
