@@ -1,0 +1,35 @@
+{
+  "name": "Gonka Agent Chat",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gonka-chat",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = items[0].json;\nreturn [{\n  json: {\n    role: input.role || 'user',\n    content: input.content || '',\n    timestamp: new Date().toISOString(),\n    phase: input.phase || 'chat',\n    tokens: input.tokens || 0\n  }\n}];"
+      },
+      "name": "Process Message",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [500, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{"node": "Process Message", "type": "main", "index": 0}]]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

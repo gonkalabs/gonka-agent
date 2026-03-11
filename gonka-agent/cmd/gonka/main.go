@@ -2,25 +2,36 @@
 //
 // Usage:
 //
-//	gonka "your task description"
-//	gonka                          # interactive mode: reads task from stdin
-//	gonka --clear-cache            # invalidate context cache and exit
-//	gonka --mode=simple "task"     # force a specific mode
-//	gonka --mode=medium "task"
-//	gonka --mode=hard "task"
+//	gonka "your task description"         # run task in CLI mode
+//	gonka                                 # interactive mode: reads task from stdin
+//	gonka init                            # first-run setup: pick role + UI mode
+//	gonka doctor                          # run self-diagnostics
+//	gonka slots                           # show binary slot stats
+//	gonka bench                           # run benchmark suite
+//	gonka update                          # check for + apply updates
+//	gonka deps                            # pull required dependencies
+//	gonka --tui "task"                    # force TUI mode
+//	gonka --n8n                           # launch n8n visual UI
+//	gonka --voice "task"                  # voice input mode
+//	gonka --clear-cache                   # invalidate context cache
+//	gonka --new                           # start a new session
+//	gonka --hard "task"                   # force hard/phased mode
 //
 // Environment variables (see .env.example):
 //
-//	GONKA_API_KEY    — primary API key (required)
-//	GONKA_API_KEYS   — comma-separated list of additional keys (for parallel planning)
-//	GONKA_SOURCE_URL — inference endpoint URL
-//	AGENT_WORKSPACE  — project directory (default: current directory)
-//	AGENT_MODEL      — model for execute phase (default: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8)
-//	AGENT_PLAN_MODEL — model for planning roles (default: same as AGENT_MODEL)
+//	OPENROUTER_API_KEY  — primary inference via OpenRouter (fast tool calls)
+//	OPENROUTER_MODEL    — model for OpenRouter (default: auto)
+//	GONKA_API_URL       — Gonka/opengnk proxy URL
+//	GONKA_API_KEY       — Gonka API keys (comma-separated for rotation)
+//	OLLAMA_URL          — local Ollama URL (fallback)
+//	OLLAMA_MODEL        — model for Ollama (default: qwen2.5-coder:7b)
+//	AGENT_WORKSPACE     — project directory (default: current directory)
+//	AGENT_MODEL         — model for execute phase
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,13 +39,20 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gonkalabs/gonka-agent/internal/agent"
 	"github.com/gonkalabs/gonka-agent/internal/config"
+	"github.com/gonkalabs/gonka-agent/internal/healthmon"
+	"github.com/gonkalabs/gonka-agent/internal/n8n"
 	"github.com/gonkalabs/gonka-agent/internal/rolechain"
 	"github.com/gonkalabs/gonka-agent/internal/roles"
 	"github.com/gonkalabs/gonka-agent/internal/semcache"
+	"github.com/gonkalabs/gonka-agent/internal/setup"
+	"github.com/gonkalabs/gonka-agent/internal/skills"
 	"github.com/gonkalabs/gonka-agent/internal/slotstore"
 	"github.com/gonkalabs/gonka-agent/internal/tools"
+	appTUI "github.com/gonkalabs/gonka-agent/internal/tui"
+	"github.com/gonkalabs/gonka-agent/internal/version"
 )
 
 // ─── ANSI colour helpers ─────────────────────────────────────────────────────
@@ -49,6 +67,9 @@ const (
 	ansiBlue   = "\033[34m"
 	ansiRed    = "\033[31m"
 	ansiGray   = "\033[90m"
+
+	colorTurquoise = "\033[38;2;0;212;170m"
+	colorBlue      = "\033[38;2;0;136;255m"
 )
 
 func col(c, s string) string { return c + s + ansiReset }
@@ -56,19 +77,55 @@ func col(c, s string) string { return c + s + ansiReset }
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "doctor":
+			runDoctor()
+			return
+		case "init":
+			runInit()
+			return
+		case "slots":
+			runSlots()
+			return
+		case "bench":
+			runBench()
+			return
+		case "update":
+			runUpdate()
+			return
+		case "deps":
+			runDeps()
+			return
+		}
+	}
+
+	// Parse flags
 	hardMode := false
 	clearCache := false
 	newSession := false
+	tuiMode := false
+	n8nMode := false
+	voiceMode := false
 	var taskArgs []string
 
 	for _, arg := range os.Args[1:] {
 		switch {
+		case arg == "--version" || arg == "-v":
+			fmt.Println("gonka " + version.String())
+			return
 		case arg == "--clear-cache":
 			clearCache = true
 		case arg == "--hard":
 			hardMode = true
 		case arg == "--new":
 			newSession = true
+		case arg == "--tui":
+			tuiMode = true
+		case arg == "--n8n":
+			n8nMode = true
+		case arg == "--voice":
+			voiceMode = true
 		case strings.HasPrefix(arg, "-"):
 			// ignore unknown flags
 		default:
@@ -79,13 +136,54 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, col(ansiRed, "config error: ")+"%v\n", err)
-		fmt.Fprintf(os.Stderr, "  Run: cp .env.example .env  and fill in GONKA_API_KEY\n")
+		fmt.Fprintf(os.Stderr, "  Run: cp .env.example .env  and fill in GONKA_API_KEY or OPENROUTER_API_KEY\n")
 		os.Exit(1)
 	}
 
-	// EmbedURL: prefer AGENT_EMBED_URL (local fastembed sidecar) over inference URL.
-	// Gonka inference nodes only serve /v1/chat/completions, not /v1/embeddings.
-	// Start: python3 scripts/embed-server.py  →  set AGENT_EMBED_URL=http://localhost:8001/v1
+	// Initialize global health monitor
+	cacheDir := filepath.Join(cfg.Workspace, ".gonka-cache")
+	monitor := healthmon.New(cacheDir)
+	monitor.Start()
+	defer monitor.Stop()
+
+	// Load skill packs
+	if err := skills.Load(); err != nil {
+		monitor.Reportf("skills", healthmon.SevWarn, "failed to load skill packs: %v", err)
+	}
+
+	// Initialize inference router from env
+	router, err := setup.InferenceRouter()
+	if err != nil {
+		monitor.Reportf("inference", healthmon.SevError, "router init: %v", err)
+	}
+
+	// Probe all providers in background
+	if router != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		probeResults := router.ProbeAll(ctx)
+		cancel()
+		for name, err := range probeResults {
+			if err != nil {
+				monitor.Reportf("inference", healthmon.SevWarn, "provider %s unreachable: %v", name, err)
+			}
+		}
+	}
+
+	// n8n mode: launch visual UI and exit
+	if n8nMode {
+		runN8N(cacheDir, monitor)
+		return
+	}
+
+	// TUI mode
+	if tuiMode {
+		_ = voiceMode // will be used in C.10
+		runTUI(taskArgs, cfg, monitor)
+		return
+	}
+
+	// ─── Classic CLI mode ─────────────────────────────────────────────────
+
 	embedURL := cfg.EmbedURL
 	if embedURL == "" {
 		embedURL = cfg.GonkaDirectURL
@@ -103,20 +201,20 @@ func main() {
 
 	if clearCache {
 		rolechain.InvalidateCache(cfg.Workspace)
-		fmt.Println(col(ansiGreen, "✓")+" context cache cleared for: "+cfg.Workspace)
+		fmt.Println(col(ansiGreen, "✓") + " context cache cleared for: " + cfg.Workspace)
 		return
 	}
 	if newSession {
 		agent.ClearSession(cfg.Workspace)
-		fmt.Println(col(ansiGreen, "✓")+" session cleared for: "+cfg.Workspace)
+		fmt.Println(col(ansiGreen, "✓") + " session cleared for: " + cfg.Workspace)
 		return
 	}
 
-	// Read task.
 	var task string
 	if len(taskArgs) > 0 {
 		task = strings.Join(taskArgs, " ")
 	} else {
+		printBanner()
 		fmt.Print(col(ansiBold, "Task: "))
 		sc := bufio.NewScanner(os.Stdin)
 		if sc.Scan() {
@@ -134,13 +232,11 @@ func main() {
 	client := agent.NewClient(cfg.GonkaDirectURL, cfg.GonkaAPIKey, model)
 	client.SetKeys(cfg.GonkaAPIKeys)
 
-	// Load pending feedback from previous run and schedule it on first request.
 	if fb := loadPendingFeedback(cfg.Workspace); fb != "" {
 		client.SetFeedback(fb)
 		clearPendingFeedback(cfg.Workspace)
 	}
 
-	// Semantic cache: lookup before running, store after success.
 	sc, scErr := semcache.New(semcache.Config{
 		CacheDir:   filepath.Join(cfg.Workspace, ".gonka-cache"),
 		APIBaseURL: embedURL,
@@ -148,7 +244,6 @@ func main() {
 		EmbedModel: cfg.EmbedModel,
 	})
 
-	// Binary singularity slot store: load slots, ingest raw input.
 	slots, slotErr := slotstore.Open(slotstore.Config{
 		SlotDir:      cfg.BSSlotDir,
 		EmbedURL:     cfg.BSEmbedURL,
@@ -167,25 +262,42 @@ func main() {
 		}
 	}()
 
-	// Header — no complexity label, just project info.
+	// Header
 	fmt.Printf("\n%s %s\n", col(ansiBold, "gonka"), col(ansiGray, "coding agent"))
 	fmt.Printf("  task:      %s\n", col(ansiBold, truncateStr(task, 60)))
 	if bi.Language != "" {
 		fmt.Printf("  language:  %s  build: %s\n", col(ansiCyan, bi.Language), col(ansiGray, bi.BuildCmd))
 	}
 	fmt.Printf("  pool:      %s keys\n", col(ansiGreen, fmt.Sprintf("%d", pool.Size())))
+	if router != nil {
+		status := router.ProviderStatus()
+		var provNames []string
+		for _, s := range status {
+			icon := col(ansiGreen, "●")
+			if s.BreakerState != "closed" {
+				icon = col(ansiRed, "○")
+			}
+			provNames = append(provNames, icon+" "+s.Name)
+		}
+		fmt.Printf("  inference: %s\n", strings.Join(provNames, "  "))
+	}
 	if slots != nil && slots.Count() > 0 {
 		fmt.Printf("  slots:     %s binary patterns loaded\n", col(ansiCyan, fmt.Sprintf("%d", slots.Count())))
 	}
 	fmt.Printf("  workspace: %s\n\n", col(ansiGray, cfg.Workspace))
 
-	progress := makeProgressFn()
+	progressBus := appTUI.NewProgressBus(true)
+	progress := makeBusProgressFn(progressBus)
 
-	// Context injection: semcache + slot store.
 	var sys string
 	sys = agent.BuildSystemPrompt(t, bi)
 
-	// Slot store: search local patterns + mesh pool (cross-participant).
+	// Inject skill pack prompt rules
+	skillRules := skills.PromptAugmentation("developer")
+	if skillRules != "" {
+		sys += "\n\n## Active Skill Rules\n" + skillRules
+	}
+
 	if slots != nil {
 		var allMatches []slotstore.SearchResult
 		if slots.Count() > 0 {
@@ -203,7 +315,6 @@ func main() {
 		}
 	}
 
-	// Semcache lookup: inject context before running.
 	if scErr == nil && sc != nil {
 		if hit := sc.Lookup(task); hit.Kind != semcache.Miss {
 			label := "partial"
@@ -221,7 +332,6 @@ func main() {
 	if hardMode {
 		result = agent.RunPhased(pool, client, t, task, progress)
 	} else {
-		// Single loop — model drives everything.
 		history := agent.LoadSession(cfg.Workspace)
 		result = agent.RunWithHistory(client, t, sys, task, history, 30, progress)
 		agent.SaveSession(cfg.Workspace, result.SessionMessages)
@@ -229,7 +339,6 @@ func main() {
 
 	fmt.Print("\n")
 	if result.Err != nil {
-		// Schedule unresolved feedback for next run.
 		savePendingFeedback(cfg.Workspace, "unresolved")
 		if scErr == nil && sc != nil {
 			sc.UpdateQuality("unresolved")
@@ -239,7 +348,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Store successful result in semcache and schedule resolved feedback.
 	if scErr == nil && sc != nil {
 		scSteps := make([]semcache.Step, len(result.Steps))
 		for i, s := range result.Steps {
@@ -252,7 +360,6 @@ func main() {
 		sc.UpdateQuality("resolved")
 	}
 
-	// Distill successful result into a binary slot and share to mesh.
 	if slots != nil && result.FinalAnswer != "" {
 		if newSlot, err := slots.Distill(task, result.FinalAnswer, 0.8); err == nil && len(newSlot.Vec) > 0 {
 			fmt.Printf("  %s new slot distilled (total: %d)\n", col(ansiCyan, "◇"), slots.Count())
@@ -270,66 +377,179 @@ func main() {
 	printSummary(task, result, bi)
 }
 
-// ─── Complexity classifier ────────────────────────────────────────────────────
+// ─── Subcommands ──────────────────────────────────────────────────────────────
 
-func classifyComplexity(task string, bi tools.BuildInfo) agent.Complexity {
-	lower := strings.ToLower(task)
-	words := strings.Fields(task)
+func runDoctor() {
+	printBanner()
+	fmt.Println(col(ansiBold, "  Self-Diagnostics\n"))
 
-	// Very short or pure question → simple.
-	if len(words) <= 5 {
-		return agent.ComplexitySimple
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Hard keywords: architecture/migration/multi-file refactor.
-	hardKeywords := []string{
-		"refactor", "migrate", "redesign", "architecture", "decouple", "extract package",
-		"extract module", "rewrite", "integrate", "rename all", "move all",
-		"рефактор", "мигр", "перепис", "переработ",
-	}
-	for _, kw := range hardKeywords {
-		if strings.Contains(lower, kw) {
-			return agent.ComplexityHard
+	checks := healthmon.Doctor(ctx)
+	for _, c := range checks {
+		icon := col(ansiGreen, "✓")
+		switch c.Status {
+		case "warn":
+			icon = col(ansiYellow, "!")
+		case "fail":
+			icon = col(ansiRed, "✗")
 		}
+		fmt.Printf("  %s %-14s %s\n", icon, c.Name, col(ansiGray, c.Detail))
 	}
-
-	// Multiple file references → hard.
-	fileCount := 0
-	for _, ext := range append(bi.SourceExts, ".go", ".ts", ".py", ".rs") {
-		if strings.Count(task, ext) > 0 {
-			fileCount++
-		}
-	}
-	if fileCount >= 2 {
-		return agent.ComplexityHard
-	}
-
-	// Medium keywords: specific changes in one file.
-	mediumKeywords := []string{
-		"add", "fix", "update", "change", "remove", "implement", "create", "write",
-		"добавь", "исправь", "обнови", "удали", "реализуй", "напиши",
-	}
-	for _, kw := range mediumKeywords {
-		if strings.Contains(lower, kw) {
-			return agent.ComplexityMedium
-		}
-	}
-
-	// Default: medium.
-	return agent.ComplexityMedium
+	fmt.Println()
 }
 
-// ─── Progress display ─────────────────────────────────────────────────────────
+func runInit() {
+	printBanner()
+	fmt.Println(col(ansiBold, "  First-Run Setup\n"))
+	fmt.Println("  Select your role:")
+	fmt.Println("    " + col(colorTurquoise, "[1]") + " Developer  — coding, debugging, deployment")
+	fmt.Println("    " + col(colorBlue, "[2]") + " Researcher — analysis, data, experiments")
+	fmt.Println("    " + col(ansiYellow, "[3]") + " Bot        — automated tasks, CI/CD integration")
+	fmt.Println()
+	fmt.Print("  Choice [1-3]: ")
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Scan()
+	role := strings.TrimSpace(sc.Text())
+	switch role {
+	case "1", "developer":
+		role = "developer"
+	case "2", "researcher":
+		role = "researcher"
+	case "3", "bot":
+		role = "bot"
+	default:
+		role = "developer"
+	}
 
-func makeProgressFn() agent.ProgressFn {
-	lastEvent := ""
+	fmt.Println()
+	fmt.Println("  Select UI mode:")
+	fmt.Println("    " + col(colorTurquoise, "[1]") + " TUI    — rich terminal interface (recommended)")
+	fmt.Println("    " + col(colorBlue, "[2]") + " n8n    — visual workflow UI in browser")
+	fmt.Println("    " + col(ansiGray, "[3]") + " CLI    — minimal, pipeline-friendly output")
+	fmt.Println()
+	fmt.Print("  Choice [1-3]: ")
+	sc.Scan()
+	uiMode := strings.TrimSpace(sc.Text())
+
+	cwd, _ := os.Getwd()
+	initCfg := map[string]string{
+		"role": role,
+		"ui":   uiMode,
+	}
+	data, _ := json.MarshalIndent(initCfg, "", "  ")
+	cfgDir := filepath.Join(cwd, ".gonka-cache")
+	os.MkdirAll(cfgDir, 0755)
+	os.WriteFile(filepath.Join(cfgDir, "profile.json"), data, 0644)
+
+	fmt.Printf("\n  %s Saved profile: role=%s, ui=%s\n", col(ansiGreen, "✓"), col(ansiBold, role), uiMode)
+	fmt.Println("  Run " + col(ansiBold, "gonka") + " to start working!\n")
+}
+
+func runSlots() {
+	printBanner()
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, col(ansiRed, "config: ")+"%v\n", err)
+		os.Exit(1)
+	}
+	slots, err := slotstore.Open(slotstore.Config{
+		SlotDir:    cfg.BSSlotDir,
+		EmbedURL:   cfg.BSEmbedURL,
+		EmbedModel: cfg.EmbedModel,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, col(ansiRed, "slots: ")+"%v\n", err)
+		os.Exit(1)
+	}
+	defer slots.Close()
+
+	fmt.Printf("  %s Binary Slot Store\n", col(ansiBold, "◇"))
+	fmt.Printf("  slots:   %s\n", col(ansiCyan, fmt.Sprintf("%d", slots.Count())))
+	fmt.Printf("  dir:     %s\n\n", col(ansiGray, cfg.BSSlotDir))
+}
+
+func runBench() {
+	fmt.Println(col(colorTurquoise, "  gonka bench") + " — not yet implemented (Phase C.12)")
+	fmt.Println("  Will run N iterations of a reference task, measure tokens/time/latency.")
+}
+
+func runUpdate() {
+	fmt.Println(col(colorTurquoise, "  gonka update") + " — not yet implemented (Phase D.13)")
+	fmt.Println("  Will check GitHub Releases for newer binary + apply.")
+}
+
+func runDeps() {
+	fmt.Println(col(colorTurquoise, "  gonka deps") + " — not yet implemented (Phase D.14)")
+	fmt.Println("  Will auto-pull required repos (opengnk, gonka-main) for slot flow.")
+}
+
+func runN8N(cacheDir string, monitor *healthmon.Monitor) {
+	printBanner()
+	fmt.Println(col(ansiBold, "  Launching n8n Visual UI...\n"))
+
+	mgr := n8n.NewManager(cacheDir)
+	ctx := context.Background()
+	if err := mgr.Start(ctx); err != nil {
+		monitor.Reportf("n8n", healthmon.SevError, "start failed: %v", err)
+		fmt.Fprintf(os.Stderr, col(ansiRed, "n8n: ")+"%v\n", err)
+		fmt.Fprintln(os.Stderr, "  Ensure Docker is running: docker info")
+		os.Exit(1)
+	}
+
+	fmt.Printf("  %s n8n is running at: %s\n", col(ansiGreen, "✓"), col(ansiBold, mgr.URL()))
+	fmt.Println("  Open in your browser to manage workflows visually.")
+	fmt.Println("  Press Ctrl+C to stop.")
+	fmt.Println()
+
+	// Block until interrupted
+	ch := make(chan struct{})
+	<-ch
+}
+
+func runTUI(taskArgs []string, cfg *config.Config, monitor *healthmon.Monitor) {
+	model := appTUI.New()
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	if len(taskArgs) > 0 {
+		task := strings.Join(taskArgs, " ")
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			p.Send(appTUI.ChatMsg{Role: "user", Content: task})
+		}()
+	}
+
+	_, err := p.Run()
+	if err != nil {
+		monitor.Reportf("tui", healthmon.SevError, "TUI error: %v", err)
+		fmt.Fprintf(os.Stderr, col(ansiRed, "TUI error: ")+"%v\n", err)
+		os.Exit(1)
+	}
+}
+
+// ─── Banner ───────────────────────────────────────────────────────────────────
+
+func printBanner() {
+	fmt.Println()
+	fmt.Println(col(colorTurquoise, "  ╔═══════════════════════════════════╗"))
+	fmt.Println(col(colorTurquoise, "  ║") + col(ansiBold, "     GONKA GO ") + col(ansiGray, "coding agent      ") + col(colorTurquoise, "║"))
+	fmt.Println(col(colorTurquoise, "  ╚═══════════════════════════════════╝"))
+	fmt.Println()
+}
+
+// ─── Progress with bus integration ────────────────────────────────────────────
+
+func makeBusProgressFn(bus *appTUI.ProgressBus) agent.ProgressFn {
 	return func(event, detail string) {
 		switch event {
 		case "phase":
-			fmt.Printf("\n%s %s\n", col(ansiCyan+ansiBold, "▶"), col(ansiBold, detail))
+			bus.Emit(detail, "", "", 0)
+			fmt.Printf("\n%s %s\n", col(colorTurquoise+ansiBold, "▶"), col(ansiBold, detail))
 		case "role":
-			fmt.Printf("  %s %s\n", col(ansiBlue, "·"), col(ansiDim, detail))
+			fmt.Printf("  %s %s\n", col(colorBlue, "·"), col(ansiDim, detail))
 		case "tool":
+			bus.Emit("", detail, detail, 0)
 			fmt.Printf("  %s %s\n", col(ansiYellow, "⚙"), detail)
 		case "result":
 			if strings.HasPrefix(detail, "[err]") {
@@ -352,45 +572,56 @@ func makeProgressFn() agent.ProgressFn {
 		case "cache":
 			fmt.Printf("  %s %s\n", col(ansiGray, "◈"), col(ansiGray, detail))
 		case "think":
-			if lastEvent != "think" {
-				fmt.Printf("  %s %s\n", col(ansiGray, "…"), col(ansiGray, truncate(detail, 100)))
-			}
+			fmt.Printf("  %s %s\n", col(ansiGray, "…"), col(ansiGray, truncate(detail, 100)))
 		}
-		lastEvent = event
 	}
+}
+
+// ─── Complexity classifier ────────────────────────────────────────────────────
+
+func classifyComplexity(task string, bi tools.BuildInfo) agent.Complexity {
+	lower := strings.ToLower(task)
+	words := strings.Fields(task)
+
+	if len(words) <= 5 {
+		return agent.ComplexitySimple
+	}
+
+	hardKeywords := []string{
+		"refactor", "migrate", "redesign", "architecture", "decouple", "extract package",
+		"extract module", "rewrite", "integrate", "rename all", "move all",
+		"рефактор", "мигр", "перепис", "переработ",
+	}
+	for _, kw := range hardKeywords {
+		if strings.Contains(lower, kw) {
+			return agent.ComplexityHard
+		}
+	}
+
+	fileCount := 0
+	for _, ext := range append(bi.SourceExts, ".go", ".ts", ".py", ".rs") {
+		if strings.Count(task, ext) > 0 {
+			fileCount++
+		}
+	}
+	if fileCount >= 2 {
+		return agent.ComplexityHard
+	}
+
+	mediumKeywords := []string{
+		"add", "fix", "update", "change", "remove", "implement", "create", "write",
+		"добавь", "исправь", "обнови", "удали", "реализуй", "напиши",
+	}
+	for _, kw := range mediumKeywords {
+		if strings.Contains(lower, kw) {
+			return agent.ComplexityMedium
+		}
+	}
+
+	return agent.ComplexityMedium
 }
 
 // ─── Header & summary ─────────────────────────────────────────────────────────
-
-func printHeader(task string, complexity agent.Complexity, bi tools.BuildInfo, poolSize int, workspace string) {
-	modeColor := ansiGreen
-	switch complexity {
-	case agent.ComplexityMedium:
-		modeColor = ansiYellow
-	case agent.ComplexityHard:
-		modeColor = ansiRed
-	}
-
-	lang := bi.Language
-	if lang == "" || lang == "unknown" {
-		lang = "?"
-	}
-	build := bi.BuildCmd
-	if build == "" {
-		build = "?"
-	}
-
-	fmt.Println()
-	fmt.Printf("%s %s\n", col(ansiBold, "gonka"), col(ansiGray, "coding agent"))
-	fmt.Printf("  task:      %s\n", col(ansiBold, truncate(task, 70)))
-	fmt.Printf("  mode:      %s\n", col(modeColor+ansiBold, string(complexity)))
-	fmt.Printf("  language:  %s  build: %s\n", col(ansiCyan, lang), col(ansiGray, build))
-	if poolSize > 1 {
-		fmt.Printf("  pool:      %s keys (parallel planning enabled)\n", col(ansiGreen, fmt.Sprintf("%d", poolSize)))
-	}
-	fmt.Printf("  workspace: %s\n", col(ansiGray, workspace))
-	fmt.Println()
-}
 
 func printSummary(task string, result agent.RunResult, bi tools.BuildInfo) {
 	elapsed := time.Duration(result.ElapsedMs) * time.Millisecond
@@ -415,7 +646,7 @@ func printSummary(task string, result agent.RunResult, bi tools.BuildInfo) {
 	}
 
 	fmt.Println()
-	fmt.Println(col(ansiGray, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
+	fmt.Println(col(colorTurquoise, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 	fmt.Printf("  %-10s %s\n", col(ansiGray, "task:"), truncate(task, 60))
 	fmt.Printf("  %-10s %s\n", col(ansiGray, "mode:"), string(result.Mode))
 	fmt.Printf("  %-10s %s  |  lang: %s  build: %s\n",
@@ -439,7 +670,7 @@ func printSummary(task string, result agent.RunResult, bi tools.BuildInfo) {
 	if verdict != "" {
 		fmt.Printf("  %-10s %s\n", col(ansiGray, "verdict:"), verdict)
 	}
-	fmt.Println(col(ansiGray, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
+	fmt.Println(col(colorTurquoise, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 }
 
 func truncate(s string, n int) string {
@@ -452,10 +683,6 @@ func truncate(s string, n int) string {
 func truncateStr(s string, n int) string { return truncate(s, n) }
 
 // ─── Feedback persistence ─────────────────────────────────────────────────────
-// Feedback from the current run is stored to disk and loaded on the next run,
-// then sent as X-Inference-Feedback on the first inference request.
-// This ensures opengnk quality middleware receives L4 signal even across
-// process restarts (each gonka invocation is a separate process).
 
 type feedbackFile struct {
 	Outcome string `json:"outcome"`

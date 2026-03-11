@@ -1,0 +1,58 @@
+name: data_ops
+description: Data operations — file analysis, JSON/CSV processing, pattern extraction
+roles: ["researcher", "developer", "*"]
+
+tools:
+  - name: json_query
+    description: Query JSON files with jq-like syntax
+    parameters:
+      file:
+        type: string
+        description: Path to JSON file
+        required: true
+      query:
+        type: string
+        description: "jq filter expression (e.g. '.results[] | .name')"
+        required: true
+    command: "cat {{.file}} | jq '{{.query}}' 2>&1"
+
+  - name: count_lines
+    description: Count lines in files matching a pattern
+    parameters:
+      pattern:
+        type: string
+        description: "Glob pattern (e.g. '*.go')"
+        required: true
+    command: "cd {{.WorkDir}} && find . -name '{{.pattern}}' -exec wc -l {} + | tail -1"
+
+  - name: grep_pattern
+    description: Search for patterns across files with context
+    parameters:
+      pattern:
+        type: string
+        description: Regex pattern to search
+        required: true
+      path:
+        type: string
+        description: "Directory or file to search (default: .)"
+        required: false
+      context:
+        type: integer
+        description: Lines of context around matches
+        required: false
+    command: "cd {{.WorkDir}} && rg --color=never -n {{if .context}}-C {{.context}} {{end}}'{{.pattern}}' {{if .path}}{{.path}}{{else}}.{{end}} 2>&1 | head -100"
+
+  - name: file_stats
+    description: Show file type distribution and sizes in a directory
+    parameters:
+      path:
+        type: string
+        description: "Directory path (default: .)"
+        required: false
+    command: "cd {{.WorkDir}} && find {{if .path}}{{.path}}{{else}}.{{end}} -type f | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -20"
+
+prompt_rules:
+  - "Validate JSON before processing with jq"
+  - "For large files (>10MB), use streaming tools instead of loading entirely into memory"
+  - "Always report data dimensions (rows, columns) when analyzing datasets"
+  - "Truncate output to reasonable limits to avoid context overflow"

@@ -1,0 +1,60 @@
+name: dev_ops
+description: Development operations — build, test, lint, Docker, dependency management
+roles: ["developer", "bot", "*"]
+
+tools:
+  - name: run_build
+    description: Run project build command
+    parameters:
+      target:
+        type: string
+        description: "Build target (default: all)"
+        required: false
+    command: "cd {{.WorkDir}} && make {{if .target}}{{.target}}{{else}}build{{end}}"
+
+  - name: run_lint
+    description: Run linters (go vet, staticcheck)
+    parameters:
+      package:
+        type: string
+        description: "Go package path (default: ./...)"
+        required: false
+    command: "cd {{.WorkDir}} && go vet {{if .package}}{{.package}}{{else}}./...{{end}} 2>&1"
+
+  - name: run_tests
+    description: Run tests with race detector
+    parameters:
+      package:
+        type: string
+        description: "Go package path (default: ./...)"
+        required: false
+      verbose:
+        type: boolean
+        description: Verbose output
+        required: false
+    command: "cd {{.WorkDir}} && go test -race {{if .verbose}}-v {{end}}{{if .package}}{{.package}}{{else}}./...{{end}} 2>&1"
+
+  - name: docker_compose
+    description: Run docker-compose commands
+    parameters:
+      action:
+        type: string
+        description: "Action: up, down, logs, ps, restart"
+        required: true
+      service:
+        type: string
+        description: Specific service name
+        required: false
+    command: "cd {{.WorkDir}} && docker compose {{.action}} {{if .service}}{{.service}}{{end}} {{if eq .action \"up\"}}-d{{end}}"
+
+  - name: go_mod_tidy
+    description: Tidy Go module dependencies
+    parameters: {}
+    command: "cd {{.WorkDir}} && go mod tidy"
+
+prompt_rules:
+  - "Always run `go vet` before committing Go code"
+  - "Use `go test -race` to catch data races in concurrent code"
+  - "Never deploy without passing tests"
+  - "Use Docker Compose for local multi-service development"
+  - "Keep go.mod tidy — run `go mod tidy` after adding/removing imports"

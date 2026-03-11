@@ -1,0 +1,112 @@
+name: git_ops
+description: Full Git workflow tools — commit, branch, stash, push, cherry-pick, PR creation
+roles: ["developer", "researcher", "bot", "*"]
+
+tools:
+  - name: git_commit
+    description: Stage and commit changes with a message
+    parameters:
+      message:
+        type: string
+        description: Commit message
+        required: true
+      files:
+        type: string
+        description: "Space-separated file paths to stage (default: all changed)"
+        required: false
+    command: "cd {{.WorkDir}} && git add {{if .files}}{{.files}}{{else}}.{{end}} && git commit -m '{{.message}}'"
+
+  - name: git_branch
+    description: Create or switch to a branch
+    parameters:
+      name:
+        type: string
+        description: Branch name
+        required: true
+      create:
+        type: boolean
+        description: Create the branch if it doesn't exist
+        required: false
+    command: "cd {{.WorkDir}} && git checkout {{if .create}}-b {{end}}{{.name}}"
+
+  - name: git_checkout
+    description: Checkout a specific branch or commit
+    parameters:
+      ref:
+        type: string
+        description: Branch name, tag, or commit hash
+        required: true
+    command: "cd {{.WorkDir}} && git checkout {{.ref}}"
+
+  - name: git_log
+    description: Show recent commit history
+    parameters:
+      count:
+        type: integer
+        description: Number of commits to show
+        required: false
+    command: "cd {{.WorkDir}} && git log --oneline -{{if .count}}{{.count}}{{else}}20{{end}}"
+
+  - name: git_stash
+    description: Stash or pop working directory changes
+    parameters:
+      action:
+        type: string
+        description: "Action: push, pop, list, drop"
+        required: true
+      message:
+        type: string
+        description: Stash message (for push)
+        required: false
+    command: "cd {{.WorkDir}} && git stash {{.action}} {{if and (eq .action \"push\") .message}}-m '{{.message}}'{{end}}"
+
+  - name: git_push
+    description: Push commits to remote
+    parameters:
+      remote:
+        type: string
+        description: "Remote name (default: origin)"
+        required: false
+      branch:
+        type: string
+        description: Branch name (default current branch)
+        required: false
+      force:
+        type: boolean
+        description: Force push
+        required: false
+    command: "cd {{.WorkDir}} && git push {{if .remote}}{{.remote}}{{else}}origin{{end}} {{if .branch}}{{.branch}}{{end}} {{if .force}}--force-with-lease{{end}}"
+
+  - name: git_cherry_pick
+    description: Cherry-pick one or more commits
+    parameters:
+      commits:
+        type: string
+        description: Space-separated commit hashes
+        required: true
+    command: "cd {{.WorkDir}} && git cherry-pick {{.commits}}"
+
+  - name: git_diff
+    description: Show diff of working directory or staged changes
+    parameters:
+      staged:
+        type: boolean
+        description: Show staged changes
+        required: false
+      file:
+        type: string
+        description: Specific file to diff
+        required: false
+    command: "cd {{.WorkDir}} && git diff {{if .staged}}--staged {{end}}{{if .file}}-- {{.file}}{{end}}"
+
+  - name: git_status
+    description: Show working tree status
+    parameters: {}
+    command: "cd {{.WorkDir}} && git status --short"
+
+prompt_rules:
+  - "ALWAYS run `git status` before committing to verify what will be staged"
+  - "Write descriptive commit messages: type(scope): description"
+  - "Never force-push to main/master without explicit user confirmation"
+  - "Use `--force-with-lease` instead of `--force` for safety"
+  - "Stash uncommitted changes before switching branches"
