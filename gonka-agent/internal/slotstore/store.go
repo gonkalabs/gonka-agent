@@ -47,6 +47,7 @@ type SearchResult struct {
 type Config struct {
 	SlotDir      string
 	EmbedURL     string
+	EmbedModel   string
 	QualityURL   string
 	ChunkLines   int
 	MinSimBps    int
@@ -70,12 +71,15 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.MinSimBps <= 0 {
 		cfg.MinSimBps = 7500
 	}
+	if cfg.EmbedModel == "" {
+		cfg.EmbedModel = "all-MiniLM-L6-v2"
+	}
 
 	_ = os.MkdirAll(cfg.SlotDir, 0755)
 	s := &Store{cfg: cfg}
 
-	if err := s.load(); err != nil {
-		return s, nil
+	if err := s.load(); err != nil && !os.IsNotExist(err) {
+		return s, fmt.Errorf("slotstore: load %s: %w", cfg.SlotDir, err)
 	}
 
 	if cfg.RawInputPath != "" {
@@ -138,14 +142,15 @@ func (s *Store) Search(task string) []SearchResult {
 }
 
 // Distill creates a new slot from a successful task completion.
-func (s *Store) Distill(task, solution string, quality float32) error {
+// Returns the created slot so callers can share it to the mesh.
+func (s *Store) Distill(task, solution string, quality float32) (Slot, error) {
 	if s.cfg.EmbedURL == "" {
-		return nil
+		return Slot{}, nil
 	}
 
 	vec, err := s.embed(task)
 	if err != nil {
-		return err
+		return Slot{}, err
 	}
 
 	slot := Slot{
@@ -159,7 +164,69 @@ func (s *Store) Distill(task, solution string, quality float32) error {
 
 	s.slots = append(s.slots, slot)
 	s.dirty = true
-	return nil
+	return slot, nil
+}
+
+// SearchMesh queries the quality-middleware mesh pool for cross-participant patterns.
+// Returns results merged with local search — other participants' slots become available.
+func (s *Store) SearchMesh(task string) []SearchResult {
+	if s.cfg.QualityURL == "" || s.cfg.EmbedURL == "" {
+		return nil
+	}
+	qv, err := s.embed(task)
+	if err != nil || len(qv) == 0 {
+		return nil
+	}
+
+	type meshHit struct {
+		NodeID   string  `json:"node_id"`
+		SlotID   string  `json:"slot_id"`
+		SimBps   uint32  `json:"sim_bps"`
+		HitMode  string  `json:"hit_mode"`
+		Quality  float32 `json:"quality"`
+		UseCount int64   `json:"use_count"`
+	}
+	type meshResp struct {
+		Results []meshHit `json:"results"`
+	}
+
+	payload, _ := json.Marshal(struct {
+		Query []float32 `json:"query"`
+		TopK  int       `json:"top_k"`
+	}{Query: qv, TopK: 5})
+
+	url := strings.TrimRight(s.cfg.QualityURL, "/") + "/quality/search"
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	var mr meshResp
+	if err := json.NewDecoder(resp.Body).Decode(&mr); err != nil {
+		return nil
+	}
+
+	var results []SearchResult
+	threshold := float32(s.cfg.MinSimBps) / 10000.0
+	for _, h := range mr.Results {
+		sim := float32(h.SimBps) / 10000.0
+		if sim >= threshold {
+			results = append(results, SearchResult{
+				Slot: Slot{
+					ID:      h.SlotID,
+					Task:    fmt.Sprintf("[mesh:%s] %s", h.NodeID, h.HitMode),
+					Quality: h.Quality,
+				},
+				Similarity: sim,
+			})
+		}
+	}
+	return results
 }
 
 // ShareToMesh pushes a slot to the quality-middleware mesh pool
@@ -295,12 +362,23 @@ func (s *Store) load() error {
 
 func (s *Store) save() error {
 	path := filepath.Join(s.cfg.SlotDir, "pattern_slots.gob")
-	f, err := os.Create(path)
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return gob.NewEncoder(f).Encode(s.slots)
+	if err := gob.NewEncoder(f).Encode(s.slots); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	f.Close()
+	return os.Rename(tmp, path)
 }
 
 type embedReq struct {
@@ -317,13 +395,14 @@ type embedResp struct {
 func (s *Store) embed(text string) ([]float32, error) {
 	body, _ := json.Marshal(embedReq{
 		Input: text,
-		Model: "all-MiniLM-L6-v2",
+		Model: s.cfg.EmbedModel,
 	})
 
 	url := strings.TrimRight(s.cfg.EmbedURL, "/")
-	if !strings.HasSuffix(url, "/v1/embeddings") && !strings.HasSuffix(url, "/embeddings") {
-		url += "/v1/embeddings"
-	}
+	url = strings.TrimSuffix(url, "/v1")
+	url = strings.TrimSuffix(url, "/embeddings")
+	url = strings.TrimSuffix(url, "/v1")
+	url += "/v1/embeddings"
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))

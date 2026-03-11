@@ -152,6 +152,7 @@ func main() {
 	slots, slotErr := slotstore.Open(slotstore.Config{
 		SlotDir:      cfg.BSSlotDir,
 		EmbedURL:     cfg.BSEmbedURL,
+		EmbedModel:   cfg.EmbedModel,
 		QualityURL:   cfg.BSQualityURL,
 		ChunkLines:   cfg.BSChunkLines,
 		MinSimBps:    cfg.BSMinSimBps,
@@ -184,13 +185,21 @@ func main() {
 	var sys string
 	sys = agent.BuildSystemPrompt(t, bi)
 
-	// Slot store: search for matching patterns before running.
-	if slots != nil && slots.Count() > 0 {
-		if matches := slots.Search(task); len(matches) > 0 {
-			fmt.Printf("  %s %d slot matches (best=%.2f)\n",
-				col(ansiCyan, "◇"), len(matches), matches[0].Similarity)
-			progress("cache", fmt.Sprintf("slot store: %d matches, best=%.2f", len(matches), matches[0].Similarity))
-			sys += slotstore.FormatContext(matches)
+	// Slot store: search local patterns + mesh pool (cross-participant).
+	if slots != nil {
+		var allMatches []slotstore.SearchResult
+		if slots.Count() > 0 {
+			allMatches = append(allMatches, slots.Search(task)...)
+		}
+		if meshResults := slots.SearchMesh(task); len(meshResults) > 0 {
+			fmt.Printf("  %s %d mesh pool matches\n", col(ansiGray, "↗"), len(meshResults))
+			allMatches = append(allMatches, meshResults...)
+		}
+		if len(allMatches) > 0 {
+			fmt.Printf("  %s %d total slot matches (best=%.2f)\n",
+				col(ansiCyan, "◇"), len(allMatches), allMatches[0].Similarity)
+			progress("cache", fmt.Sprintf("slots: %d matches, best=%.2f", len(allMatches), allMatches[0].Similarity))
+			sys += slotstore.FormatContext(allMatches)
 		}
 	}
 
@@ -245,20 +254,9 @@ func main() {
 
 	// Distill successful result into a binary slot and share to mesh.
 	if slots != nil && result.FinalAnswer != "" {
-		if err := slots.Distill(task, result.FinalAnswer, 0.8); err == nil {
+		if newSlot, err := slots.Distill(task, result.FinalAnswer, 0.8); err == nil && len(newSlot.Vec) > 0 {
 			fmt.Printf("  %s new slot distilled (total: %d)\n", col(ansiCyan, "◇"), slots.Count())
-			newest := slotstore.Slot{
-				ID: fmt.Sprintf("slot-%d", slots.Count()),
-				Vec: func() []float32 {
-					// Retrieve vec from last distilled slot
-					if results := slots.Search(task); len(results) > 0 {
-						return results[0].Slot.Vec
-					}
-					return nil
-				}(),
-				Quality: 0.8,
-			}
-			if err := slots.ShareToMesh(newest); err == nil {
+			if err := slots.ShareToMesh(newSlot); err == nil {
 				fmt.Printf("  %s shared to mesh pool\n", col(ansiGray, "↗"))
 			}
 		}

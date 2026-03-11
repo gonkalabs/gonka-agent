@@ -119,8 +119,8 @@ func Load() (*Config, error) {
 		primaryKey = allKeys[0]
 	}
 
-	// Resolve the single inference URL: GONKA_DIRECT_URL > GONKA_SOURCE_URL > local opengnk proxy.
-	// opengnk runs on :9090 and proxies to the Gonka network inference nodes.
+	// Resolve inference URL: GONKA_DIRECT_URL > GONKA_SOURCE_URL > local quality-middleware.
+	// Default :9090 = quality-middleware, which wraps opengnk (:8080/8081).
 	inferURL := getEnv("GONKA_DIRECT_URL", "")
 	if inferURL == "" {
 		inferURL = getEnv("GONKA_SOURCE_URL", "")
