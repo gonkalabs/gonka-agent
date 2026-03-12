@@ -132,6 +132,31 @@ After the one-time setup the UI loads directly on every subsequent launch.
 
 ---
 
+## Your workflow gets better over time
+
+Every task you run through the binary is distilled into a PatternSlot — a
+compressed binary representation of what worked. Next time you hit a similar
+task, the agent injects that pattern as context *before* calling the LLM.
+
+```
+Task 1: "add retry logic to upload"   → solved → PatternSlot saved
+Task 2: "add retry to download"       → slot match found → answer in ~5ms, no full inference needed
+Task N: ...                           → your personal pattern library grows
+```
+
+You don't configure anything. The binary does it automatically.
+Slots are stored locally in `~/.gonka-cache/slots/` and optionally shared
+to the mesh so other agents on the network benefit from your solved tasks.
+
+To load your existing workflow (git log, notes, specs) as seed context:
+
+```bash
+BS_RAW_INPUT=/path/to/any/file ./gonka "task"
+# agent reads the file, embeds it, uses it as context from the first message
+```
+
+---
+
 ## Key features (binary-singularity branch)
 
 - **Multi-provider inference** — Gonka DAPI primary, OpenRouter overflow, Ollama local; per-request timeouts + automatic fallback
