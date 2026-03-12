@@ -246,5 +246,5 @@ Deploy guide: [../gonka-main/deploy/binary-singularity/GUIDE.md](../gonka-main/d
 ---
 
 *Part of Binary Singularity — dev/binary-singularity.*
-*For researchers: your data, your patterns, your contribution to the mesh.*
+*For researchers: your tasks, your patterns, your contribution to the mesh.*
 *Beta for researchers encourages faith in you ♥*
