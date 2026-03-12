@@ -5,3 +5,4 @@ __pycache__/
 venv/
 .cursor/
 .inference/
+thesis_and_failover_matrix.md
