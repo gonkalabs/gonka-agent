@@ -1,18 +1,46 @@
 version: "3.9"
 
-# One-button setup for gonka-agent.
-# Usage:
-#   GONKA_API_KEY=gnk_live_... docker compose run --rm agent "fix the race condition in server.go"
+# One-button setup for gonka-agent with built-in signing proxy.
 #
-# Or set GONKA_API_KEY in .env file.
+# Usage:
+#   cp .env.example .env   # fill GONKA_PRIVATE_KEY
+#   docker compose run --rm agent "fix the race condition in server.go"
+#
+# The opengnk sidecar handles wallet signing so the agent talks plain
+# OpenAI-compatible HTTP to localhost:8090.  No manual proxy setup needed.
 
 services:
+  # Signing proxy — discovers DAPI nodes, signs requests with your wallet.
+  # Required because DAPI nodes do NOT accept Bearer tokens.
+  opengnk:
+    image: ghcr.io/gonkalabs/opengnk:latest
+    build:
+      context: ../opengnk
+      dockerfile: Dockerfile
+    environment:
+      - GONKA_PRIVATE_KEY=${GONKA_PRIVATE_KEY}
+      - GONKA_ADDRESS=${GONKA_ADDRESS:-}
+      - GONKA_SOURCE_URL=${GONKA_SOURCE_URL:-http://node2.gonka.ai:8000}
+      - PORT=8090
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/v1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   agent:
     build: .
     image: gonka-agent:latest
+    depends_on:
+      opengnk:
+        condition: service_healthy
     environment:
-      - GONKA_API_KEY=${GONKA_API_KEY}
-      - GONKA_SOURCE_URL=${GONKA_SOURCE_URL:-https://gonka.gg/api/public}
+      - GONKA_API_KEY=${GONKA_API_KEY:-unused}
+      - GONKA_SOURCE_URL=http://opengnk:8090/v1
+      - GONKA_DIRECT_URL=http://opengnk:8090/v1
       - AGENT_MODEL=${AGENT_MODEL:-Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}
       - AGENT_ALLOW_SHELL=${AGENT_ALLOW_SHELL:-true}
       - AGENT_COMMAND_TIMEOUT=${AGENT_COMMAND_TIMEOUT:-120s}

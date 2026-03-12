@@ -19,11 +19,12 @@
 //
 // Environment variables (see .env.example):
 //
-//	OPENROUTER_API_KEY  — primary inference via OpenRouter (fast tool calls)
-//	OPENROUTER_MODEL    — model for OpenRouter (default: auto)
-//	GONKA_API_URL       — Gonka/opengnk proxy URL
+//	GONKA_API_URL       — PRIMARY: Gonka DAPI via opengnk proxy
 //	GONKA_API_KEY       — Gonka API keys (comma-separated for rotation)
-//	OLLAMA_URL          — local Ollama URL (fallback)
+//	GONKA_MODEL         — model for Gonka (default: Qwen3-235B)
+//	OPENROUTER_API_KEY  — OVERFLOW: distributes tool-call / non-critical streams
+//	OPENROUTER_MODEL    — model for OpenRouter
+//	OLLAMA_URL          — LOCAL FALLBACK: offline-capable
 //	OLLAMA_MODEL        — model for Ollama (default: qwen2.5-coder:7b)
 //	AGENT_WORKSPACE     — project directory (default: current directory)
 //	AGENT_MODEL         — model for execute phase
@@ -35,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -44,6 +46,7 @@ import (
 	"github.com/gonkalabs/gonka-agent/internal/config"
 	"github.com/gonkalabs/gonka-agent/internal/healthmon"
 	"github.com/gonkalabs/gonka-agent/internal/n8n"
+	"github.com/gonkalabs/gonka-agent/internal/profile"
 	"github.com/gonkalabs/gonka-agent/internal/rolechain"
 	"github.com/gonkalabs/gonka-agent/internal/roles"
 	"github.com/gonkalabs/gonka-agent/internal/semcache"
@@ -61,15 +64,20 @@ const (
 	ansiReset  = "\033[0m"
 	ansiBold   = "\033[1m"
 	ansiDim    = "\033[2m"
-	ansiGreen  = "\033[32m"
-	ansiYellow = "\033[33m"
-	ansiCyan   = "\033[36m"
-	ansiBlue   = "\033[34m"
-	ansiRed    = "\033[31m"
-	ansiGray   = "\033[90m"
+	ansiGreen  = "\033[38;2;0;230;118m"
+	ansiYellow = "\033[38;2;255;214;0m"
+	ansiCyan   = "\033[38;2;0;229;255m"
+	ansiBlue   = "\033[38;2;80;180;255m"
+	ansiRed    = "\033[38;2;255;82;82m"
 
-	colorTurquoise = "\033[38;2;0;212;170m"
-	colorBlue      = "\033[38;2;0;136;255m"
+	// Gonka palette — bright blue / turquoise / metallic ONLY
+	colorTurquoise  = "\033[38;2;0;212;170m"
+	colorBrightBlue = "\033[38;2;80;180;255m"
+	colorMetallic   = "\033[38;2;160;200;220m"
+
+	// ansiGray replaced with metallic — no black/dark anywhere
+	ansiGray = "\033[38;2;160;200;220m"
+	colorBlue = "\033[38;2;0;136;255m"
 )
 
 func col(c, s string) string { return c + s + ansiReset }
@@ -124,6 +132,9 @@ func main() {
 			tuiMode = true
 		case arg == "--n8n":
 			n8nMode = true
+		case arg == "--ui":
+			// --ui: interactive choice between TUI and n8n
+			tuiMode = true // default to TUI; user can switch to n8n with Ctrl+N inside
 		case arg == "--voice":
 			voiceMode = true
 		case strings.HasPrefix(arg, "-"):
@@ -231,6 +242,9 @@ func main() {
 	pool := roles.NewLLMPoolDualModel(cfg.GonkaDirectURL, model, model, cfg.GonkaAPIKeys)
 	client := agent.NewClient(cfg.GonkaDirectURL, cfg.GonkaAPIKey, model)
 	client.SetKeys(cfg.GonkaAPIKeys)
+	if cfg.FallbackKey != "" {
+		client.SetFallback(cfg.FallbackURL, cfg.FallbackKey, cfg.FallbackModel)
+	}
 
 	if fb := loadPendingFeedback(cfg.Workspace); fb != "" {
 		client.SetFeedback(fb)
@@ -263,7 +277,7 @@ func main() {
 	}()
 
 	// Header
-	fmt.Printf("\n%s %s\n", col(ansiBold, "gonka"), col(ansiGray, "coding agent"))
+	fmt.Printf("\n%s %s\n", col(ansiBold, "gonka"), col(colorBrightBlue, "coding agent"))
 	fmt.Printf("  task:      %s\n", col(ansiBold, truncateStr(task, 60)))
 	if bi.Language != "" {
 		fmt.Printf("  language:  %s  build: %s\n", col(ansiCyan, bi.Language), col(ansiGray, bi.BuildCmd))
@@ -292,7 +306,11 @@ func main() {
 	var sys string
 	sys = agent.BuildSystemPrompt(t, bi)
 
-	// Inject skill pack prompt rules
+	// Inject seed patterns (baked into binary) + skill pack prompt rules
+	seedAug := profile.SeedPromptAugmentation(profile.RoleDeveloper)
+	if seedAug != "" {
+		sys += "\n" + seedAug
+	}
 	skillRules := skills.PromptAugmentation("developer")
 	if skillRules != "" {
 		sys += "\n\n## Active Skill Rules\n" + skillRules
@@ -487,7 +505,7 @@ func runDeps() {
 
 func runN8N(cacheDir string, monitor *healthmon.Monitor) {
 	printBanner()
-	fmt.Println(col(ansiBold, "  Launching n8n Visual UI...\n"))
+	fmt.Printf("  %s Starting n8n...\n\n", col(colorTurquoise, "◈"))
 
 	mgr := n8n.NewManager(cacheDir)
 	ctx := context.Background()
@@ -498,13 +516,11 @@ func runN8N(cacheDir string, monitor *healthmon.Monitor) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("  %s n8n is running at: %s\n", col(ansiGreen, "✓"), col(ansiBold, mgr.URL()))
-	fmt.Println("  Open in your browser to manage workflows visually.")
-	fmt.Println("  Press Ctrl+C to stop.")
-	fmt.Println()
+	fmt.Printf("  %s %s\n", col(ansiGreen, "✓"), col(colorBrightBlue, mgr.URL()))
+	fmt.Printf("  %s\n\n", col(colorMetallic, "Ctrl+C to stop"))
 
-	// Block until interrupted
-	ch := make(chan struct{})
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
 	<-ch
 }
 
@@ -533,7 +549,7 @@ func runTUI(taskArgs []string, cfg *config.Config, monitor *healthmon.Monitor) {
 func printBanner() {
 	fmt.Println()
 	fmt.Println(col(colorTurquoise, "  ╔═══════════════════════════════════╗"))
-	fmt.Println(col(colorTurquoise, "  ║") + col(ansiBold, "     GONKA GO ") + col(ansiGray, "coding agent      ") + col(colorTurquoise, "║"))
+	fmt.Println(col(colorTurquoise, "  ║") + col(ansiBold, "     GONKA GO ") + col(colorBrightBlue, "coding agent      ") + col(colorTurquoise, "║"))
 	fmt.Println(col(colorTurquoise, "  ╚═══════════════════════════════════╝"))
 	fmt.Println()
 }
@@ -554,6 +570,8 @@ func makeBusProgressFn(bus *appTUI.ProgressBus) agent.ProgressFn {
 		case "result":
 			if strings.HasPrefix(detail, "[err]") {
 				fmt.Printf("  %s %s\n", col(ansiRed, "✗"), col(ansiDim, detail))
+			} else if strings.Contains(detail, "web_fetch failed after") {
+				fmt.Printf("  %s %s\n", col(ansiRed, "⚠"), col(ansiYellow, truncate(detail, 140)))
 			} else {
 				fmt.Printf("  %s %s\n", col(ansiGreen, "✓"), col(ansiGray, truncate(detail, 120)))
 			}

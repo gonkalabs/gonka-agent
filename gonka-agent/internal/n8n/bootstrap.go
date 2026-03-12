@@ -56,9 +56,14 @@ func (m *Manager) Start(ctx context.Context) error {
 		"-p", n8nPort+":5678",
 		"-v", m.dataDir+":/home/node/.n8n",
 		"-e", "N8N_BASIC_AUTH_ACTIVE=false",
+		"-e", "N8N_SECURE_COOKIE=false",
+		"-e", "N8N_PROTOCOL=http",
+		"-e", "N8N_PERSONALIZATION_ENABLED=false",
+		"-e", "N8N_DIAGNOSTICS_ENABLED=false",
+		"-e", "N8N_VERSION_NOTIFICATIONS_ENABLED=false",
 		"-e", "GENERIC_TIMEZONE=UTC",
 		"--restart", "unless-stopped",
-		"n8nio/n8n:latest",
+		"n8nio/n8n:1.72.1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

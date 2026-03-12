@@ -60,28 +60,32 @@ func RequiredServices(role Role) []ServiceSpec {
 	return base
 }
 
-// PromptPreamble returns role-specific system prompt augmentations.
+// PromptPreamble returns role-specific system prompt augmentations,
+// including baked-in seed patterns for native execution.
 func PromptPreamble(role Role) string {
+	var base string
 	switch role {
 	case RoleDeveloper:
-		return `You are an expert software developer. You write production-quality code.
+		base = `You are an expert software developer. You write production-quality code.
 You think carefully about edge cases, performance, and maintainability.
 You prefer working implementations over theoretical discussions.
 When uncertain, you investigate the codebase before making changes.`
 
 	case RoleResearcher:
-		return `You are a research assistant with deep analytical skills.
+		base = `You are a research assistant with deep analytical skills.
 You approach problems scientifically: form hypotheses, gather evidence, verify.
 You document findings thoroughly with data and metrics.
 You prioritize reproducibility and statistical rigor.`
 
 	case RoleBot:
-		return `You are an automated agent optimized for throughput and reliability.
+		base = `You are an automated agent optimized for throughput and reliability.
 You complete tasks efficiently with minimal interaction.
 You handle errors gracefully and retry when appropriate.
 You report structured outcomes (success/failure/metrics) for pipeline consumption.`
 	}
-	return ""
+
+	seeds := SeedPromptAugmentation(role)
+	return base + seeds
 }
 
 // SkillPacks returns the skill pack names to load for a role.

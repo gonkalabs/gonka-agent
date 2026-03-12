@@ -19,9 +19,13 @@ type Config struct {
 	GonkaAPIKeys    []string // all keys: GONKA_API_KEYS (comma-sep) + GONKA_API_KEY merged
 
 	// Models: PlanModel for fast planning roles, AgentModel for execute phase.
-	// If PlanModel is empty, AgentModel is used for both.
 	AgentModel string
 	PlanModel  string
+
+	// Fallback inference (OpenRouter) — used when Gonka DAPI times out.
+	FallbackURL   string
+	FallbackKey   string
+	FallbackModel string
 
 	// Workspace
 	Workspace          string
@@ -180,6 +184,9 @@ func Load() (*Config, error) {
 		MCPPort:           getEnv("AGENT_MCP_PORT", "3000"),
 		AgentModel:        getEnv("AGENT_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"),
 		PlanModel:         getEnv("AGENT_PLAN_MODEL", ""),
+		FallbackURL:       getEnv("OPENROUTER_URL", "https://openrouter.ai/api/v1"),
+		FallbackKey:       getEnv("OPENROUTER_API_KEY", ""),
+		FallbackModel:     getEnv("OPENROUTER_MODEL", ""),
 		BSSlotDir:         bsSlotDir,
 		BSRawInput:        getEnv("BS_RAW_INPUT", ""),
 		BSChunkLines:      bsChunkLines,

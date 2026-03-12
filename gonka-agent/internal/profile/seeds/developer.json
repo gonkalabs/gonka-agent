@@ -1,0 +1,88 @@
+{
+  "role": "developer",
+  "version": "0.3.0",
+  "description": "Standard developer seed patterns — baked into binary, executed natively",
+  "flows": {
+    "new_go_package": {
+      "trigger": ["create package", "new package", "extract to package", "move to package"],
+      "steps": [
+        "mkdir -p {pkg_name}",
+        "write {pkg_name}/{pkg_name}.go with package declaration + exported types",
+        "go build ./...",
+        "update consumers to import {module}/{pkg_name}",
+        "go build ./..."
+      ]
+    },
+    "add_http_endpoint": {
+      "trigger": ["add endpoint", "http handler", "REST API", "serve GET", "serve POST"],
+      "steps": [
+        "define handler: func handle{Name}(w http.ResponseWriter, r *http.Request)",
+        "register: http.HandleFunc(\"/{path}\", handle{Name})",
+        "write httptest integration test",
+        "go test -v ./..."
+      ]
+    },
+    "fix_bug": {
+      "trigger": ["fix bug", "fix error", "debug", "broken", "doesn't work", "failing"],
+      "steps": [
+        "read buggy file(s)",
+        "write FAILING test that reproduces the bug",
+        "fix the code",
+        "go test -race ./..."
+      ]
+    },
+    "refactor_extract": {
+      "trigger": ["refactor", "extract", "move function", "split file", "decouple"],
+      "steps": [
+        "read ALL involved files in one batch",
+        "create new package with extracted code",
+        "go build ./...",
+        "update old files to import new package",
+        "go build ./... && go test ./..."
+      ]
+    },
+    "add_test": {
+      "trigger": ["add test", "write test", "test coverage", "unit test"],
+      "steps": [
+        "read the target file",
+        "create {file}_test.go with table-driven tests",
+        "go test -v -race ./..."
+      ]
+    },
+    "docker_service": {
+      "trigger": ["docker", "container", "docker-compose", "deploy"],
+      "steps": [
+        "check docker info",
+        "write Dockerfile or docker-compose.yml",
+        "docker compose up -d",
+        "docker compose logs --tail=20"
+      ]
+    },
+    "git_workflow": {
+      "trigger": ["commit", "push", "branch", "merge", "PR"],
+      "steps": [
+        "git status",
+        "git add -A",
+        "git commit -m \"type(scope): description\"",
+        "git push origin HEAD"
+      ]
+    },
+    "concurrency_fix": {
+      "trigger": ["deadlock", "race condition", "mutex", "goroutine", "concurrent"],
+      "steps": [
+        "read file with concurrency code",
+        "identify: does any goroutine Lock() a mutex held by its spawner?",
+        "pattern: snapshot under lock → release → goroutines with WaitGroup",
+        "go vet ./... && go test -race -count=1 ./..."
+      ]
+    }
+  },
+  "anti_patterns": {
+    "duplicate_types": "NEVER define the same type in multiple files. Define once, import everywhere.",
+    "lock_in_goroutine": "NEVER spawn goroutines that Lock() a mutex already held by the spawner.",
+    "guess_file_content": "NEVER guess file content for search_replace. ALWAYS read first.",
+    "sequential_tools": "NEVER call tools one-by-one when they're independent. Batch them.",
+    "infinite_retry": "NEVER retry the same failing operation more than 3 times. Simplify approach.",
+    "write_before_read": "NEVER write a file you haven't read in this session."
+  }
+}

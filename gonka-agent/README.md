@@ -9,27 +9,43 @@ Branch: `dev/binary-singularity` | Part of [GiP #860](https://github.com/gonka-a
 
 ---
 
-## Quick start — any machine with Go 1.22+
+## Quick start — docker compose (recommended)
 
 ```bash
-# Clone and build (no CGO, no system deps, ~5s)
 git clone https://github.com/gonkalabs/gonka-agent
 cd gonka-agent
+cp .env.example .env
+# Set GONKA_PRIVATE_KEY (hex, from your Gonka wallet)
+
+docker compose run --rm agent "describe your task"
+```
+
+This starts the `opengnk` signing proxy automatically. The proxy discovers
+DAPI nodes, signs inference requests with your wallet, and exposes a standard
+OpenAI-compatible endpoint to the agent. No manual setup.
+
+## Quick start — bare metal (Go 1.22+)
+
+```bash
+# 1. Build the agent
 go build -o bin/gonka ./cmd/gonka
 
-# Configure
-cp .env.example .env
-# Set GONKA_API_KEY (get at gonka.gg → API Keys)
+# 2. Build and start the signing proxy (required — DAPI needs wallet signing)
+cd ../opengnk && go build -o bin/opengnk ./cmd/proxy
+GONKA_PRIVATE_KEY=<hex> GONKA_ADDRESS=gonka1... \
+  GONKA_SOURCE_URL=http://node2.gonka.ai:8000 PORT=8090 \
+  ./bin/opengnk &
 
-# Run
+# 3. Configure and run the agent
+cd ../gonka-agent
+cp .env.example .env
+# Set GONKA_PRIVATE_KEY, GONKA_SOURCE_URL=http://localhost:8090/v1
 ./bin/gonka "describe your task"
 ```
 
-**Or use the prebuilt binary:**
-```bash
-# Linux x86_64, statically linked, 6MB
-./bin/gonka  # included in this branch
-```
+> **Why opengnk?** DAPI nodes do NOT accept Bearer tokens. Every inference
+> request must be signed with a Cosmos wallet private key. The `opengnk`
+> proxy handles this transparently.
 
 ---
 
@@ -73,9 +89,9 @@ All settings in `.env` (copy from `.env.example`).
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GONKA_API_KEY` | yes | — | Primary key (`gnk_live_…`) |
-| `GONKA_API_KEYS` | no | — | Comma-sep pool — parallel planning |
-| `GONKA_SOURCE_URL` | no | `https://gonka.gg/api/public` | Inference endpoint |
+| `GONKA_PRIVATE_KEY` | yes | — | Hex wallet key (for opengnk signing) |
+| `GONKA_ADDRESS` | no | derived | Gonka bech32 address |
+| `GONKA_SOURCE_URL` | no | `http://localhost:8090/v1` | Inference endpoint (opengnk proxy) |
 | `AGENT_MODEL` | no | Qwen3-235B | Execute phase model |
 | `AGENT_PLAN_MODEL` | no | same | Smaller model for planning |
 | `AGENT_WORKSPACE` | no | `.` | Directory the agent reads/writes |

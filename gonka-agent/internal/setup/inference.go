@@ -13,30 +13,38 @@ import (
 )
 
 // InferenceRouter builds a Router from environment variables.
-// Priority order: OpenRouter > Gonka > Ollama > custom INFER_PROVIDER_N.
+// Priority order: Gonka (primary) > OpenRouter (overflow/non-critical) > Ollama (local fallback).
+// Gonka is OUR binary — all critical reasoning goes through DAPI.
+// OpenRouter handles overflow, tool-call-heavy streams, and fallback.
 func InferenceRouter() (*inference.Router, error) {
 	var pp []inference.Provider
 
-	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-		model := os.Getenv("OPENROUTER_MODEL")
-		pp = append(pp, providers.NewOpenRouter(key, model))
-		slog.Info("inference: added OpenRouter", "model", model)
-	}
-
+	// 1. Gonka DAPI — PRIMARY. Our infrastructure, our binary.
 	if url := os.Getenv("GONKA_API_URL"); url != "" {
 		model := os.Getenv("GONKA_MODEL")
+		if model == "" {
+			model = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+		}
 		var keys []string
 		if k := os.Getenv("GONKA_API_KEY"); k != "" {
 			keys = strings.Split(k, ",")
 		}
 		pp = append(pp, providers.NewGonka(url, model, keys))
-		slog.Info("inference: added Gonka", "url", url)
+		slog.Info("inference: [PRIMARY] Gonka DAPI", "url", url, "model", model)
 	}
 
+	// 2. OpenRouter — OVERFLOW. Distributes non-critical / tool-call streams.
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		model := os.Getenv("OPENROUTER_MODEL")
+		pp = append(pp, providers.NewOpenRouter(key, model))
+		slog.Info("inference: [OVERFLOW] OpenRouter", "model", model)
+	}
+
+	// 3. Ollama — LOCAL FALLBACK. Zero-cost, offline capable.
 	if url := os.Getenv("OLLAMA_URL"); url != "" {
 		model := os.Getenv("OLLAMA_MODEL")
 		pp = append(pp, providers.NewOllama(url, model))
-		slog.Info("inference: added Ollama", "url", url)
+		slog.Info("inference: [FALLBACK] Ollama", "url", url)
 	}
 
 	for i := 1; i <= 9; i++ {

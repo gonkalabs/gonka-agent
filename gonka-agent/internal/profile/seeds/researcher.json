@@ -1,0 +1,48 @@
+{
+  "role": "researcher",
+  "version": "0.3.0",
+  "description": "Research seed patterns — analysis, experiments, data validation",
+  "flows": {
+    "analyze_codebase": {
+      "trigger": ["analyze", "understand", "how does", "architecture", "structure"],
+      "steps": [
+        "list_dir to get project overview",
+        "read key files: go.mod, main.go, README",
+        "grep_search for the target concept",
+        "synthesize findings into structured report"
+      ]
+    },
+    "benchmark": {
+      "trigger": ["benchmark", "performance", "measure", "profile", "latency"],
+      "steps": [
+        "identify metric to measure",
+        "write benchmark test: func Benchmark{Name}(b *testing.B)",
+        "go test -bench=. -benchmem ./...",
+        "format results as markdown table"
+      ]
+    },
+    "data_analysis": {
+      "trigger": ["data", "csv", "json", "parse", "statistics", "count"],
+      "steps": [
+        "read/fetch the data source",
+        "parse and validate format",
+        "compute statistics (count, mean, distribution)",
+        "present as markdown table with insights"
+      ]
+    },
+    "verify_hypothesis": {
+      "trigger": ["verify", "check if", "is it true", "prove", "hypothesis"],
+      "steps": [
+        "state the hypothesis clearly",
+        "identify evidence sources (code, data, web)",
+        "gather evidence with tools",
+        "verdict: CONFIRMED / REFUTED / INSUFFICIENT with reasoning"
+      ]
+    }
+  },
+  "anti_patterns": {
+    "skip_evidence": "NEVER state conclusions without evidence from tools.",
+    "single_source": "NEVER rely on one source. Cross-reference at least 2.",
+    "no_metrics": "ALWAYS include quantitative metrics in analysis (counts, percentages, latency)."
+  }
+}

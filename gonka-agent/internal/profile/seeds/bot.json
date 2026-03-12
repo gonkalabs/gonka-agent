@@ -1,0 +1,48 @@
+{
+  "role": "bot",
+  "version": "0.3.0",
+  "description": "Bot seed patterns — automated tasks, CI/CD, pipeline-friendly",
+  "flows": {
+    "ci_check": {
+      "trigger": ["CI", "pipeline", "check", "validate", "lint"],
+      "steps": [
+        "go vet ./...",
+        "go test -race -count=1 -timeout=120s ./...",
+        "go build ./...",
+        "report: {pass_count} passed, {fail_count} failed"
+      ]
+    },
+    "auto_fix": {
+      "trigger": ["auto-fix", "fix all", "batch fix", "resolve"],
+      "steps": [
+        "run diagnostics to identify all issues",
+        "sort by severity (error > warning > info)",
+        "fix each issue, verify with go build after each",
+        "final go test -race ./..."
+      ]
+    },
+    "deploy": {
+      "trigger": ["deploy", "release", "publish", "ship"],
+      "steps": [
+        "go test ./...",
+        "make release",
+        "verify checksums",
+        "git tag v{version}",
+        "git push --tags"
+      ]
+    },
+    "monitor": {
+      "trigger": ["monitor", "health", "status", "check services"],
+      "steps": [
+        "gonka doctor",
+        "check all endpoints",
+        "report status table"
+      ]
+    }
+  },
+  "anti_patterns": {
+    "interactive": "NEVER ask questions. Infer from context and act.",
+    "verbose": "NEVER output explanatory text. Output structured JSON or minimal status.",
+    "skip_tests": "NEVER deploy without passing tests."
+  }
+}

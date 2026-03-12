@@ -2,35 +2,34 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Gonka GO palette: turquoise-blue-black
+// Gonka GO palette: bright-blue / turquoise / metallic — NO black, NO dark gray
 var (
-	ColorTurquoise = lipgloss.Color("#00D4AA")
-	ColorBlue      = lipgloss.Color("#0088FF")
-	ColorDarkBlue  = lipgloss.Color("#0044AA")
-	ColorBlack     = lipgloss.Color("#0A0E14")
-	ColorDarkGray  = lipgloss.Color("#1A1E28")
-	ColorMidGray   = lipgloss.Color("#3A3E48")
-	ColorLightGray = lipgloss.Color("#8A8E98")
-	ColorWhite     = lipgloss.Color("#E0E4EE")
-	ColorRed       = lipgloss.Color("#FF4466")
-	ColorYellow    = lipgloss.Color("#FFCC00")
-	ColorGreen     = lipgloss.Color("#00FF88")
+	ColorTurquoise  = lipgloss.Color("#00D4AA")
+	ColorBrightBlue = lipgloss.Color("#50B4FF")
+	ColorBlue       = lipgloss.Color("#0088FF")
+	ColorMetallic   = lipgloss.Color("#A0C8DC")
+	ColorBG         = lipgloss.Color("#0C1824")
+	ColorPanel      = lipgloss.Color("#142838")
+	ColorWhite      = lipgloss.Color("#E0F0FF")
+	ColorRed        = lipgloss.Color("#FF5252")
+	ColorYellow     = lipgloss.Color("#FFD600")
+	ColorGreen      = lipgloss.Color("#00E676")
+	ColorMidGray    = lipgloss.Color("#50B4FF") // borders use blue, not gray
 
 	StyleTitle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(ColorTurquoise).
-			Background(ColorBlack).
 			Padding(0, 1)
 
 	StyleSubtitle = lipgloss.NewStyle().
-			Foreground(ColorBlue).
+			Foreground(ColorBrightBlue).
 			Bold(true)
 
 	StyleNormal = lipgloss.NewStyle().
 			Foreground(ColorWhite)
 
 	StyleDim = lipgloss.NewStyle().
-			Foreground(ColorLightGray)
+			Foreground(ColorMetallic)
 
 	StyleError = lipgloss.NewStyle().
 			Foreground(ColorRed).
@@ -50,30 +49,29 @@ var (
 
 	StyleActiveTab = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorBlack).
+			Foreground(ColorBG).
 			Background(ColorTurquoise).
 			Padding(0, 2)
 
 	StyleInactiveTab = lipgloss.NewStyle().
-			Foreground(ColorLightGray).
-			Background(ColorDarkGray).
+			Foreground(ColorMetallic).
+			Background(ColorPanel).
 			Padding(0, 2)
 
 	StyleStatusBar = lipgloss.NewStyle().
 			Foreground(ColorTurquoise).
-			Background(ColorDarkGray).
+			Background(ColorPanel).
 			Padding(0, 1)
 
 	StyleInput = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
-			BorderForeground(ColorBlue).
+			BorderForeground(ColorBrightBlue).
 			Padding(0, 1)
 
 	StyleSpinner = lipgloss.NewStyle().
 			Foreground(ColorTurquoise)
 )
 
-// Logo returns the Gonka GO ASCII art banner.
 func Logo() string {
 	logo := `
   ██████╗  ██████╗ ███╗   ██╗██╗  ██╗ █████╗ 

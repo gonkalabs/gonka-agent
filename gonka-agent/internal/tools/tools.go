@@ -336,29 +336,63 @@ func (c *Cfg) RunCommand(cmdStr string) Result {
 // ─── WEB: web_fetch ───────────────────────────────────────────────────────────
 
 func (c *Cfg) WebFetch(url string) Result {
-	client := &http.Client{Timeout: c.WebFetchTimeout}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fail(err.Error())
+	return c.WebFetchWithHeaders(url, nil)
+}
+
+func (c *Cfg) WebFetchWithHeaders(url string, headers map[string]string) Result {
+	timeout := c.WebFetchTimeout
+	if timeout == 0 {
+		timeout = 15 * time.Second
 	}
-	req.Header.Set("User-Agent", "gonka-agent/1.0")
-	req.Header.Set("Accept", "text/html,text/plain,application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return fail(err.Error())
+
+	const maxRetries = 3
+	var lastErr string
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+
+		client := &http.Client{Timeout: timeout}
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return fail(err.Error())
+		}
+		req.Header.Set("User-Agent", "gonka-agent/1.0 (bookworm)")
+		req.Header.Set("Accept", "text/html,text/plain,application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Sprintf("attempt %d/%d: %v", attempt+1, maxRetries, err)
+			continue
+		}
+
+		lr := io.LimitReader(resp.Body, c.WebFetchMaxSize)
+		data, readErr := io.ReadAll(lr)
+		resp.Body.Close()
+
+		if readErr != nil {
+			lastErr = fmt.Sprintf("attempt %d/%d: read body: %v", attempt+1, maxRetries, readErr)
+			continue
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			lastErr = fmt.Sprintf("attempt %d/%d: HTTP %d", attempt+1, maxRetries, resp.StatusCode)
+			continue
+		}
+
+		text := stripHTML(string(data))
+		text = strings.TrimSpace(text)
+		if text == "" {
+			text = fmt.Sprintf("(empty, status %d)", resp.StatusCode)
+		}
+		return ok(fmt.Sprintf("URL: %s\nStatus: %d\n\n%s", url, resp.StatusCode, text))
 	}
-	defer resp.Body.Close()
-	lr := io.LimitReader(resp.Body, c.WebFetchMaxSize)
-	data, err := io.ReadAll(lr)
-	if err != nil {
-		return fail(err.Error())
-	}
-	text := stripHTML(string(data))
-	text = strings.TrimSpace(text)
-	if text == "" {
-		text = fmt.Sprintf("(empty, status %d)", resp.StatusCode)
-	}
-	return ok(fmt.Sprintf("URL: %s\nStatus: %d\n\n%s", url, resp.StatusCode, text))
+
+	return fail(fmt.Sprintf("web_fetch failed after %d retries for %s: %s", maxRetries, url, lastErr))
 }
 
 func stripHTML(s string) string {
@@ -384,43 +418,120 @@ func (c *Cfg) WebSearch(query string, numResults int) Result {
 	if numResults <= 0 {
 		numResults = 10
 	}
-	// Use local SearXNG if configured, otherwise fall back to DDG.
+	timeout := c.WebFetchTimeout
+	if timeout == 0 {
+		timeout = 15 * time.Second
+	}
+
+	// Try SearXNG first, then DuckDuckGo HTML as fallback.
+	results := c.trySearXNG(query, numResults, timeout)
+	if results != "" {
+		return ok(results)
+	}
+	results = c.tryDDGFallback(query, numResults, timeout)
+	if results != "" {
+		return ok(results)
+	}
+	return ok("no results found for: " + query + " (SearXNG unavailable, DDG fallback returned nothing)")
+}
+
+func (c *Cfg) trySearXNG(query string, numResults int, timeout time.Duration) string {
 	searxURL := c.SearXNGURL
 	if searxURL == "" {
 		searxURL = "http://localhost:8888"
 	}
-	searchURL := searxURL + "/search?q=" + strings.ReplaceAll(query, " ", "+") + "&format=json"
-	client := &http.Client{Timeout: c.WebFetchTimeout}
-	req, err := http.NewRequest("GET", searchURL, nil)
-	if err != nil {
-		return fail(err.Error())
+
+	encoded := strings.ReplaceAll(query, " ", "+")
+	searchURL := searxURL + "/search?q=" + encoded + "&format=json"
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		client := &http.Client{Timeout: timeout}
+		req, err := http.NewRequest("GET", searchURL, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			continue
+		}
+
+		var searxResp struct {
+			Results []struct {
+				Title   string `json:"title"`
+				URL     string `json:"url"`
+				Content string `json:"content"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(data, &searxResp); err != nil || len(searxResp.Results) == 0 {
+			continue
+		}
+
+		var sb strings.Builder
+		for i, r := range searxResp.Results {
+			if i >= numResults {
+				break
+			}
+			sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Content))
+		}
+		return sb.String()
 	}
+	return ""
+}
+
+func (c *Cfg) tryDDGFallback(query string, numResults int, timeout time.Duration) string {
+	encoded := strings.ReplaceAll(query, " ", "+")
+	ddgURL := "https://html.duckduckgo.com/html/?q=" + encoded
+
+	client := &http.Client{Timeout: timeout}
+	req, _ := http.NewRequest("GET", ddgURL, nil)
+	if req == nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fail(err.Error())
+		return ""
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 200000))
 
-	var searxResp struct {
-		Results []struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(data, &searxResp); err != nil || len(searxResp.Results) == 0 {
-		return ok("no results found for: " + query)
+	body := string(data)
+	titleRe := regexp.MustCompile(`<a[^>]+class="result__a"[^>]*>([^<]+)</a>`)
+	urlRe := regexp.MustCompile(`<a[^>]+class="result__url"[^>]*href="([^"]+)"`)
+	snippetRe := regexp.MustCompile(`<a[^>]+class="result__snippet"[^>]*>([^<]+)`)
+
+	titles := titleRe.FindAllStringSubmatch(body, numResults)
+	urls := urlRe.FindAllStringSubmatch(body, numResults)
+	snippets := snippetRe.FindAllStringSubmatch(body, numResults)
+
+	if len(titles) == 0 {
+		return ""
 	}
 
 	var sb strings.Builder
-	for i, r := range searxResp.Results {
-		if i >= numResults {
-			break
+	sb.WriteString("[DDG fallback]\n\n")
+	for i := 0; i < len(titles) && i < numResults; i++ {
+		title := titles[i][1]
+		u := ""
+		if i < len(urls) {
+			u = urls[i][1]
 		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Content))
+		snippet := ""
+		if i < len(snippets) {
+			snippet = snippets[i][1]
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, title, u, snippet))
 	}
-	return ok(sb.String())
+	return sb.String()
 }
 
 // ─── DIAGNOSTICS: get_diagnostics ────────────────────────────────────────────
@@ -607,12 +718,24 @@ func (c *Cfg) RunTests(path string) Result {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "-v", "-timeout", "90s", path)
+
+	// Run go vet first to catch static errors (deadlocks, printf mismatches, etc.)
+	vetCtx, vetCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer vetCancel()
+	vetCmd := exec.CommandContext(vetCtx, "go", "vet", path)
+	vetCmd.Dir = c.Workspace
+	vetOut, vetErr := vetCmd.CombinedOutput()
+
+	var sb strings.Builder
+	if vetErr != nil {
+		sb.WriteString("⚠️ go vet issues:\n" + string(vetOut) + "\n")
+	}
+
+	// Run tests with race detector enabled
+	cmd := exec.CommandContext(ctx, "go", "test", "-v", "-race", "-timeout", "90s", "-count=1", path)
 	cmd.Dir = c.Workspace
 	out, _ := cmd.CombinedOutput()
 
-	// Parse test output.
-	var sb strings.Builder
 	pass, fail := 0, 0
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "--- PASS:") {
@@ -623,11 +746,13 @@ func (c *Cfg) RunTests(path string) Result {
 			sb.WriteString("❌ " + strings.TrimPrefix(line, "--- FAIL: ") + "\n")
 		} else if strings.HasPrefix(line, "FAIL") || strings.HasPrefix(line, "ok") {
 			sb.WriteString(line + "\n")
+		} else if strings.Contains(line, "DATA RACE") {
+			fail++
+			sb.WriteString("🔴 DATA RACE DETECTED\n")
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\nSummary: %d passed, %d failed\n", pass, fail))
-	if fail > 0 {
-		// Include full output for failures.
+	if fail > 0 || vetErr != nil {
 		sb.WriteString("\nFull output:\n" + string(out))
 		return Result{Content: sb.String(), IsError: true}
 	}
@@ -778,11 +903,12 @@ func AllToolDefs() []map[string]any {
 		},
 		{
 			"name":        "web_fetch",
-			"description": "Fetch a URL and return its text content (HTML is stripped).",
+			"description": "Fetch a URL and return its text content (HTML is stripped). Supports custom headers for API authentication.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"url": map[string]any{"type": "string"},
+					"url":     map[string]any{"type": "string", "description": "URL to fetch"},
+					"headers": map[string]any{"type": "object", "description": "Optional HTTP headers (e.g. {\"X-API-Key\": \"key\"})"},
 				},
 				"required": []string{"url"},
 			},

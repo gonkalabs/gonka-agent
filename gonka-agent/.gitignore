@@ -1,6 +1,6 @@
 .env
 bin/
 dist/
-gonka
+/gonka
 *.exe
 .gonka-cache/

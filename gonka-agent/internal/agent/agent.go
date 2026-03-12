@@ -5,6 +5,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -136,6 +137,11 @@ type Client struct {
 	// Key pool with per-key cooldowns (populated via SetKeys).
 	pool *keyPool
 
+	// Fallback endpoint (OpenRouter etc.) — used when primary times out or errors.
+	fallbackURL   string
+	fallbackKey   string
+	fallbackModel string
+
 	// pendingFeedback is sent as X-Inference-Feedback on the next request then cleared.
 	pendingFeedback string
 	feedbackMu      sync.Mutex
@@ -154,18 +160,25 @@ func NewClient(baseURL, apiKey, model string) *Client {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		Model:   model,
-		HTTP:    &http.Client{Timeout: 240 * time.Second},
+		HTTP:    &http.Client{},
 		pool:    newKeyPool([]string{apiKey}),
 	}
 }
 
 // SetKeys configures the key pool for rotation on 429/auth failures.
-// Call after NewClient with all available API keys.
 func (c *Client) SetKeys(keys []string) {
 	c.pool = newKeyPool(keys)
 	if len(keys) > 0 {
 		c.APIKey = keys[0]
 	}
+}
+
+// SetFallback configures a secondary inference endpoint used when the primary
+// times out or returns errors. Typically OpenRouter.
+func (c *Client) SetFallback(url, key, model string) {
+	c.fallbackURL = strings.TrimRight(url, "/")
+	c.fallbackKey = key
+	c.fallbackModel = model
 }
 
 // SetFeedback schedules an X-Inference-Feedback header to be sent on the
@@ -177,17 +190,66 @@ func (c *Client) SetFeedback(outcome string) {
 }
 
 func (c *Client) chat(messages []Message, toolDefs []ToolDef) (*chatResponse, error) {
-	body, _ := json.Marshal(chatRequest{Model: c.Model, Messages: messages, Tools: toolDefs})
+	// Primary: 15s timeout — if DAPI is slow, fail fast to fallback.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	r, err := c.doChatCtx(ctx, c.BaseURL, c.Model, c.apiKeyForRequest(), messages, toolDefs)
+	cancel()
+	if err != nil && c.fallbackURL != "" {
+		slog.Warn("inference: primary failed, trying fallback",
+			"primary_err", err, "fallback", c.fallbackURL)
+		// Convert tool messages to user messages for providers that don't support tool role.
+		fbMessages := sanitizeMessagesForFallback(messages)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 120*time.Second)
+		r2, err2 := c.doChatCtx(ctx2, c.fallbackURL, c.fallbackModel, c.fallbackKey, fbMessages, toolDefs)
+		cancel2()
+		if err2 == nil {
+			return r2, nil
+		}
+		slog.Warn("inference: fallback also failed", "err", err2)
+		return nil, fmt.Errorf("primary: %w; fallback: %v", err, err2)
+	}
+	return r, err
+}
 
-	// Determine active key from pool (falls back to c.APIKey if pool empty).
-	apiKey := c.APIKey
+func (c *Client) apiKeyForRequest() string {
 	if c.pool != nil {
 		if k := c.pool.current(); k != "" {
-			apiKey = k
+			return k
 		}
 	}
+	return c.APIKey
+}
 
-	req, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
+// sanitizeMessagesForFallback converts tool-role messages to user-role messages
+// for providers that don't support the "tool" role (e.g., StepFun).
+func sanitizeMessagesForFallback(msgs []Message) []Message {
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			out = append(out, Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[Tool result for call %s]:\n%s", m.ToolCallID, m.Content),
+			})
+			continue
+		}
+		// Strip tool_calls from assistant messages — wrap them as text
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			content := m.Content
+			for _, tc := range m.ToolCalls {
+				content += fmt.Sprintf("\n[Called tool %s(%s)]", tc.Function.Name, tc.Function.Arguments)
+			}
+			out = append(out, Message{Role: "assistant", Content: content})
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func (c *Client) doChatCtx(ctx context.Context, baseURL, model, apiKey string, messages []Message, toolDefs []ToolDef) (*chatResponse, error) {
+	body, _ := json.Marshal(chatRequest{Model: model, Messages: messages, Tools: toolDefs})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +258,6 @@ func (c *Client) chat(messages []Message, toolDefs []ToolDef) (*chatResponse, er
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	// Send pending feedback from previous task outcome (L4 signal).
 	c.feedbackMu.Lock()
 	if c.pendingFeedback != "" {
 		req.Header.Set("X-Inference-Feedback", c.pendingFeedback)
@@ -215,7 +276,6 @@ func (c *Client) chat(messages []Message, toolDefs []ToolDef) (*chatResponse, er
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 
-	// Typed error classification: rotate key on 429, surface auth errors clearly.
 	if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 {
 		reason := classifyError(nil, resp.StatusCode)
 		if c.pool != nil {
@@ -224,18 +284,21 @@ func (c *Client) chat(messages []Message, toolDefs []ToolDef) (*chatResponse, er
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	if resp.StatusCode >= 500 {
-		reason := classifyError(nil, resp.StatusCode)
-		if c.pool != nil {
-			c.pool.markCooling(reason)
-		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if resp.StatusCode == 400 {
+		errStr := strings.TrimSpace(string(raw))
+		if strings.Contains(errStr, "tool_choice") || strings.Contains(errStr, "tool choice") {
+			slog.Warn("inference: 400 tool_choice, retrying without tools", "body", errStr[:min(len(errStr), 200)])
+			return c.doChatCtx(ctx, baseURL, model, apiKey, messages, nil)
+		}
+		return nil, fmt.Errorf("HTTP 400: %s", errStr)
 	}
 
 	var r chatResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("decode: %w\nbody: %s", err, string(raw))
 	}
-	// Track EXECUTE-phase token usage.
 	c.execPromptTokens += int64(r.Usage.PromptTokens)
 	c.execCompletionTokens += int64(r.Usage.CompletionTokens)
 	c.execCalls++
@@ -298,7 +361,18 @@ func Dispatch(t *tools.Cfg, name, argsJSON string) tools.Result {
 	case "glob":             return t.GlobSearch(str("pattern"))
 	case "grep_search":      return t.GrepSearch(str("pattern"), str("path"), intVal("context_lines", 0), boolVal("case_sensitive", false))
 	case "run_command":      return t.RunCommand(str("cmd"))
-	case "web_fetch":        return t.WebFetch(str("url"))
+	case "web_fetch":
+		hdrs := make(map[string]string)
+		if h, ok := args["headers"]; ok {
+			if hm, ok := h.(map[string]any); ok {
+				for k, v := range hm {
+					if vs, ok := v.(string); ok {
+						hdrs[k] = vs
+					}
+				}
+			}
+		}
+		return t.WebFetchWithHeaders(str("url"), hdrs)
 	case "web_search":       return t.WebSearch(str("query"), intVal("num_results", 10))
 	case "get_diagnostics":  return t.GetDiagnostics(str("path"))
 	case "code_analysis":    return t.CodeAnalysis(str("path"), str("symbol"))
@@ -984,7 +1058,66 @@ Other agents on the network solve similar tasks. Your completed solutions are st
 - GitHub: use api.github.com/users/{u}/repos or api.github.com/repos/{o}/{r}/commits — never github.com (JS SPA, returns no data).
 - Web: if 2 searches return no results, stop and answer from knowledge.
 - Files: read all needed files in one batch before editing any.
-- Loop prevention: if you already fetched or read something, do NOT fetch/read it again.`)
+- Loop prevention: if you already fetched or read something, do NOT fetch/read it again.
+- search_replace: ALWAYS read the exact file content IMMEDIATELY before calling search_replace. Copy the old_str character-for-character from the read output. If search_replace fails, re-read the file — do NOT guess the content.`)
+
+	// Go-specific concurrency rules (prevents deadlock/race bugs)
+	if bi.Language == "go" {
+		sb.WriteString(`
+
+## Go concurrency rules
+- After writing code with goroutines + sync.Mutex/RWMutex: verify no goroutine tries to Lock() a mutex that the caller already holds while waiting on WaitGroup/channel. This is a deadlock.
+- Pattern: if you need goroutine results, release the lock BEFORE spawning goroutines, collect via channel, then re-acquire.
+- After ANY file edit involving goroutines or mutexes, run: go vet ./... && go test -race -count=1 ./...
+- Verify test assertions mathematically: if threshold = maxEpoch - retainCount, manually trace which values are in range [minPruned, threshold) before asserting expected output.`)
+	}
+
+	// Multi-file coordination rules (prevents medium-scenario failures)
+	sb.WriteString(`
+
+## Multi-file coordination (critical)
+- Before creating multiple files that share types/functions: plan the FULL dependency graph FIRST.
+- Rule: define types in ONE canonical location. Import everywhere else. Never duplicate type definitions.
+- Go packages: if package A uses types from package B, define types in B. A imports B.
+- After writing ANY new file: immediately run ` + "`go build ./...`" + ` to catch import/type errors BEFORE writing the next file.
+- If a build fails after writing file N: fix file N BEFORE proceeding to file N+1.
+- Maximum 3 retries on the same build error. If stuck: simplify the approach.`)
+
+	// Standard development flows — baked in so agent never re-derives obvious patterns
+	sb.WriteString(`
+
+## Standard flows (execute natively, never re-derive)
+
+### Flow: New Go package
+1. Create directory + file with package declaration + exported types/functions
+2. ` + "`go build ./...`" + ` — verify compiles
+3. Update consumers to import the new package
+4. ` + "`go build ./...`" + ` — verify again
+
+### Flow: Add HTTP endpoint
+1. Define handler function: ` + "`func handleX(w http.ResponseWriter, r *http.Request)`" + `
+2. Register in main: ` + "`http.HandleFunc(\"/path\", handleX)`" + `
+3. Write httptest integration test
+4. ` + "`go test -v ./...`" + `
+
+### Flow: Fix a bug
+1. Read the buggy file(s)
+2. Write a FAILING test that reproduces the bug
+3. Fix the code
+4. ` + "`go test -race ./...`" + ` — verify fix + no regressions
+
+### Flow: Refactor / extract
+1. Read ALL files involved in one batch
+2. Create new package with the extracted code
+3. ` + "`go build ./...`" + `
+4. Update old files to import the new package (remove old code)
+5. ` + "`go build ./...`" + ` + ` + "`go test ./...`" + `
+
+### Flow: Git commit
+1. ` + "`git status`" + ` — verify what changed
+2. ` + "`git add -A`" + ` — stage
+3. ` + "`git commit -m \"type(scope): description\"`" + `
+4. Never force-push to main without explicit user confirmation`)
 
 	// Reversibility and action policy
 	sb.WriteString(`
@@ -993,7 +1126,23 @@ Other agents on the network solve similar tasks. Your completed solutions are st
 - Do it, don't ask: never say "should I..." or "want me to..." — act immediately.
 - Memory: when user shares name or preferences, call memory_write immediately without asking.
 - Scope: only touch what the task requires. No refactors, no extra files, no speculative changes.
-- Stop condition: when the task is done, output the result and stop. Do not keep exploring.`)
+- Stop condition: when the task is done, output the result and stop. Do not keep exploring.
+
+## Capabilities baked into this binary
+voice_input: whisper.cpp transcription — listen any language, return text
+n8n: workflow engine — docker spin, import workflow JSON, webhook triggers
+docker: write docker-compose.yml, run_command "docker compose up -d", verify with curl
+ansible: write inventory + playbook YAML, run_command "ansible-playbook -i inv play.yml"
+web_search: SearXNG local + DuckDuckGo fallback, retry x2, always returns results
+web_fetch: HTTP GET any URL with custom headers, retry x3, strips HTML
+run_command: execute any shell command on host — apt, docker, git, curl, make, go, python
+write_file: create/overwrite any file in workspace
+read_file: read any file
+search_replace: edit files precisely
+grep_search: regex search across codebase
+glob: find files by pattern
+
+Execute immediately. No explanation. No asking. Tools exist — call them.`)
 
 	// Project context
 	if bi.Language != "" {
@@ -1163,18 +1312,6 @@ func runLoop(client *Client, t *tools.Cfg, messages []Message, maxIter int, prog
 			break
 		}
 		if err != nil {
-			// 400 "auto tool choice" = inference node doesn't support native tool calling.
-			// Treat as graceful stop: return whatever was accomplished so far.
-			if strings.Contains(err.Error(), "tool choice") || strings.Contains(err.Error(), "code = 400") {
-				progress("think", "[stopping: inference node tool-choice limit reached]")
-				return RunResult{
-					Steps: steps, Success: len(steps) > 0,
-					ElapsedMs: time.Since(t0).Milliseconds(),
-					PromptTokens: totalPrompt, CompletionTokens: totalCompletion,
-					TotalTokens: totalPrompt + totalCompletion, LLMCalls: int64(i),
-					SessionMessages: messages,
-				}
-			}
 			SaveSession(t.Workspace, messages)
 			return RunResult{Err: fmt.Errorf("iteration %d: %w", i, err), Steps: steps, ElapsedMs: time.Since(t0).Milliseconds(), SessionMessages: messages}
 		}
