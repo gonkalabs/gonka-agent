@@ -6,3 +6,6 @@ venv/
 .cursor/
 .inference/
 thesis_and_failover_matrix.md
+main_context/
+gonka-api-key.md
+justrule.md
