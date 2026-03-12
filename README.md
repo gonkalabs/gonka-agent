@@ -34,24 +34,67 @@ docker compose run --rm agent "your task here"
 The compose stack boots the `bridge.py` signing proxy automatically.
 No DAPI node registration, no GonkaGate needed.
 
-## Quick start — prebuilt binary
+## Quick start — prebuilt binary (fastest)
 
 ```bash
-# 1. Start the signing proxy (needs your wallet key)
-export GONKA_PRIVATE_KEY=<hex>
-uvicorn bridge:app --host 0.0.0.0 --port 8090
+# Linux amd64
+curl -L https://github.com/gonkalabs/gonka-agent/releases/latest/download/gonka-linux-amd64 -o gonka
+chmod +x gonka
 
-# 2. Run the agent
-./gonka-agent/bin/gonka "your task"
+# macOS arm64 (M1/M2)
+curl -L https://github.com/gonkalabs/gonka-agent/releases/latest/download/gonka-darwin-arm64 -o gonka
+chmod +x gonka
+
+# Verify checksum
+curl -L https://github.com/gonkalabs/gonka-agent/releases/latest/download/checksums.txt | sha256sum -c --ignore-missing
 ```
+
+Configure and run:
+
+```bash
+cp .env.example .env
+# Set GONKA_PRIVATE_KEY (hex from your Gonka wallet)
+# Optionally set OPENROUTER_API_KEY for overflow streams
+
+./gonka "your task"          # headless CLI
+./gonka --tui                # terminal UI
+./gonka --n8n                # n8n workflow UI (see below)
+```
+
+## Workflow UI via n8n
+
+The binary ships with n8n out-of-the-box. One command spins up the full
+workflow engine in Docker — no separate install, no registration required
+after first setup:
+
+```bash
+./gonka --n8n
+# → opens http://localhost:5678
+```
+
+From n8n you can:
+- Build pipelines that call `gonka` via webhook triggers
+- Chain tasks: web research → code generation → git push
+- Schedule recurring agent runs (cron)
+- Connect to external services (Slack, GitHub, databases)
+- Use Ansible nodes inside the container to configure remote hosts
+
+First launch shows the n8n setup wizard once. After that it goes straight
+to the canvas on every restart (state persists in a Docker volume).
 
 ## Quick start — build from source
 
 ```bash
 cd gonka-agent
-go build -o bin/gonka ./cmd/gonka
+make build          # production binary → bin/gonka
+make build-voice    # with whisper.cpp voice input (requires CGO)
+make release-full   # cross-compile all platforms + bake all seed patterns
+make gh-release     # create GitHub Release and upload binaries
+
 ./bin/gonka "your task"
 ```
+
+Available targets: `make help`
 
 ---
 
