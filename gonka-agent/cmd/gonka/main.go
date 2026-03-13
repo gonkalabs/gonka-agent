@@ -266,6 +266,7 @@ func main() {
 		ChunkLines:   cfg.BSChunkLines,
 		MinSimBps:    cfg.BSMinSimBps,
 		RawInputPath: cfg.BSRawInput,
+		DomainHint:   cfg.BSDomainHint,
 	})
 	if slotErr != nil {
 		fmt.Fprintf(os.Stderr, col(ansiYellow, "slots: ")+"%v\n", slotErr)

@@ -65,6 +65,7 @@ type Config struct {
 	BSEmbedURL      string // embedder URL for slot distillation (default: EmbedURL or http://localhost:8686)
 	BSQualityURL    string // quality-middleware URL for mesh pool (default: http://localhost:9090)
 	BSDistillMode   string // continuous | ingest | both (default: continuous)
+	BSDomainHint    string // semantic domain hint for slot classification (default: empty)
 }
 
 func Load() (*Config, error) {
@@ -194,6 +195,7 @@ func Load() (*Config, error) {
 		BSEmbedURL:        bsEmbedURL,
 		BSQualityURL:      getEnv("BS_QUALITY_URL", "http://localhost:9090"),
 		BSDistillMode:     getEnv("BS_DISTILL_MODE", "continuous"),
+		BSDomainHint:      getEnv("BS_DOMAIN_HINT", ""),
 	}
 
 	if cfg.GonkaPrivateKey == "" && cfg.GonkaAPIKey == "" {

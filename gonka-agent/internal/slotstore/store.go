@@ -37,6 +37,7 @@ type Slot struct {
 	Quality   float32   `json:"quality"`
 	UseCount  int       `json:"use_count"`
 	CreatedAt time.Time `json:"created_at"`
+	Domain    string    `json:"domain,omitempty"`
 }
 
 type SearchResult struct {
@@ -52,6 +53,7 @@ type Config struct {
 	ChunkLines   int
 	MinSimBps    int
 	RawInputPath string
+	DomainHint   string
 }
 
 type Store struct {
@@ -160,6 +162,7 @@ func (s *Store) Distill(task, solution string, quality float32) (Slot, error) {
 		Vec:       vec,
 		Quality:   quality,
 		CreatedAt: time.Now(),
+		Domain:    s.cfg.DomainHint,
 	}
 
 	s.slots = append(s.slots, slot)
@@ -168,7 +171,7 @@ func (s *Store) Distill(task, solution string, quality float32) (Slot, error) {
 }
 
 // SearchMesh queries the quality-middleware mesh pool for cross-participant patterns.
-// Returns results merged with local search — other participants' slots become available.
+// Returns results with full content (Task, Solution, Domain) from other participants.
 func (s *Store) SearchMesh(task string) []SearchResult {
 	if s.cfg.QualityURL == "" || s.cfg.EmbedURL == "" {
 		return nil
@@ -185,6 +188,9 @@ func (s *Store) SearchMesh(task string) []SearchResult {
 		HitMode  string  `json:"hit_mode"`
 		Quality  float32 `json:"quality"`
 		UseCount int64   `json:"use_count"`
+		Task     string  `json:"task"`
+		Solution string  `json:"solution"`
+		Domain   string  `json:"domain"`
 	}
 	type meshResp struct {
 		Results []meshHit `json:"results"`
@@ -199,7 +205,7 @@ func (s *Store) SearchMesh(task string) []SearchResult {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return nil
+		return nil // graceful: mesh down = continue without it
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -216,11 +222,17 @@ func (s *Store) SearchMesh(task string) []SearchResult {
 	for _, h := range mr.Results {
 		sim := float32(h.SimBps) / 10000.0
 		if sim >= threshold {
+			slotTask := h.Task
+			if slotTask == "" {
+				slotTask = fmt.Sprintf("[mesh:%s] %s", h.NodeID, h.HitMode)
+			}
 			results = append(results, SearchResult{
 				Slot: Slot{
-					ID:      h.SlotID,
-					Task:    fmt.Sprintf("[mesh:%s] %s", h.NodeID, h.HitMode),
-					Quality: h.Quality,
+					ID:       h.SlotID,
+					Task:     slotTask,
+					Solution: h.Solution,
+					Quality:  h.Quality,
+					Domain:   h.Domain,
 				},
 				Similarity: sim,
 			})
@@ -231,17 +243,21 @@ func (s *Store) SearchMesh(task string) []SearchResult {
 
 // ShareToMesh pushes a slot to the quality-middleware mesh pool
 // so other participants can find it via /quality/search.
+// Sends full content (Task, Solution, Domain) for cross-participant knowledge transfer.
 func (s *Store) ShareToMesh(slot Slot) error {
 	if s.cfg.QualityURL == "" || len(slot.Vec) == 0 {
 		return nil
 	}
 
 	type meshEntry struct {
-		NodeID  string    `json:"node_id"`
-		SlotID  string    `json:"slot_id"`
-		Vec     []float32 `json:"vec"`
-		HitMode string    `json:"hit_mode"`
-		Quality float32   `json:"quality"`
+		NodeID   string    `json:"node_id"`
+		SlotID   string    `json:"slot_id"`
+		Vec      []float32 `json:"vec"`
+		HitMode  string    `json:"hit_mode"`
+		Quality  float32   `json:"quality"`
+		Task     string    `json:"task,omitempty"`
+		Solution string    `json:"solution,omitempty"`
+		Domain   string    `json:"domain,omitempty"`
 	}
 	payload := struct {
 		NodeID string      `json:"node_id"`
@@ -249,11 +265,14 @@ func (s *Store) ShareToMesh(slot Slot) error {
 	}{
 		NodeID: s.nodeID(),
 		Slots: []meshEntry{{
-			NodeID:  s.nodeID(),
-			SlotID:  slot.ID,
-			Vec:     slot.Vec,
-			HitMode: "slot",
-			Quality: slot.Quality,
+			NodeID:   s.nodeID(),
+			SlotID:   slot.ID,
+			Vec:      slot.Vec,
+			HitMode:  "slot",
+			Quality:  slot.Quality,
+			Task:     truncate(slot.Task, 500),
+			Solution: truncate(slot.Solution, 2000),
+			Domain:   slot.Domain,
 		}},
 	}
 
@@ -262,7 +281,7 @@ func (s *Store) ShareToMesh(slot Slot) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil // graceful: mesh down = continue without it
 	}
 	resp.Body.Close()
 	return nil
